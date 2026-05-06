@@ -1,5 +1,7 @@
 # Repo Skill Generator
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 Create portable, repo-specific agent skills from an existing code repository.
 
 This skill reads a target repository once, extracts its architecture,
