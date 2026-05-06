@@ -1,0 +1,4 @@
+interface:
+  display_name: "Repo Skill Generator"
+  short_description: "Create repo-specific agent skills from codebase conventions."
+  default_prompt: "Use $repo-skill-generator to inspect this repository and create a Codex, Claude, or OpenCode skill that follows its development conventions."
