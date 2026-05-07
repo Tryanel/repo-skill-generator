@@ -115,6 +115,33 @@ python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-d
 `--knowledge-depth self-contained` 是默认值。如果只想要更轻量的
 conventions-only 草稿，可以使用 `--knowledge-depth portable`。
 
+### 自定义扫描范围
+
+有些仓库的核心逻辑不在常见的 `src/` 或 `app/` 目录里。比如一个数据挖掘
+框架，最核心的流程可能在 `dag/`，数据库模板可能在 `plugin/templates/`。
+
+这时可以用 scope 参数告诉扫描器哪些目录最重要：
+
+```bash
+python scripts/draft_repo_skill.py \
+  --repo /path/to/mining-framework \
+  --skill-name mining-framework-dev \
+  --target all \
+  --focus dag \
+  --focus plugin/templates \
+  --scope-note "dag contains the core mining scripts; plugin/templates contains database templates" \
+  --output mining-framework-skill-draft.md
+```
+
+可用参数：
+
+- `--focus PATH`：把某个相对仓库根目录的文件或目录视为核心区域。可以重复
+  传多个。
+- `--include PATH`：即使某个路径通常会被跳过，也强制纳入扫描。
+- `--exclude PATH`：本次扫描跳过某个路径。
+- `--scope-note TEXT`：记录用户对扫描重点的说明，并保存在生成的 references
+  里。
+
 ## 工作流程
 
 1. 对目标仓库运行扫描器。

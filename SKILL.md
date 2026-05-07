@@ -12,6 +12,7 @@ Create compact, portable, repo-specific skills from observed repository facts. R
 ## Workflow
 
 1. Confirm the target repository path, target platform, and intended output skill name. Normalize the skill name to lowercase hyphen-case.
+   Ask for or capture the user's scan scope when some directories are more important than the default framework layout, such as `dag/`, `plugin/`, `templates/`, or domain-specific workflow folders.
 2. Run `scripts/draft_repo_skill.py` to create a first-pass evidence draft:
 
 ```bash
@@ -19,6 +20,12 @@ python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-d
 python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target claude --knowledge-depth self-contained --output repo-skill-draft.md
 python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target opencode --knowledge-depth self-contained --output repo-skill-draft.md
 python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target all --knowledge-depth self-contained --output repo-skill-draft.md
+```
+
+Use scope flags when the user identifies core directories:
+
+```bash
+python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name mining-dev --target all --focus dag --focus plugin/templates --scope-note "dag contains the core mining scripts; plugin/templates contains database templates" --output repo-skill-draft.md
 ```
 
 3. Read the draft, then inspect the most relevant files it lists. Always include README or docs, dependency manifests, build/test configs, representative source files, representative tests, and contribution or developer notes when present.
@@ -29,6 +36,7 @@ python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-d
    - testing strategy, fixtures, mocks, and acceptance expectations
    - dependency, migration, generated-code, and asset rules
    - common pitfalls, unsafe operations, or files agents should avoid touching casually
+   - user-provided focus paths and why they matter
 5. Fill the generated bundled references with self-contained repository facts:
    - `references/repo-conventions.md`: architecture, commands, tooling, style, tests, docs, and pitfalls.
    - `references/source-map.md`: module responsibilities, important symbols, public exports, and test modules.
@@ -68,6 +76,7 @@ python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-d
 - Preserve repository-specific names, paths, commands, and framework terms exactly.
 - Package repository-specific conventions into the generated skill, not into a separate local note.
 - For "out of the box" portability, ship `repo-conventions.md`, `source-map.md`, and `task-playbook.md` together.
+- If the user says certain directories are core, pass them through `--focus` and preserve the rationale in bundled references.
 - Keep generated `SKILL.md` under 500 lines; move detailed notes into references.
 - Do not overwrite an existing skill or draft unless the user explicitly asks for overwrite behavior.
 

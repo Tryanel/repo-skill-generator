@@ -167,6 +167,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting --output if it exists.")
     parser.add_argument("--max-files", type=int, default=300, help="Maximum text-like files to inspect.")
     parser.add_argument("--max-bytes", type=int, default=256_000, help="Maximum bytes to read per file.")
+    parser.add_argument(
+        "--focus",
+        action="append",
+        default=[],
+        help=(
+            "Repo-root-relative directory or file that should be treated as core. "
+            "Repeat for multiple paths, for example --focus dag --focus plugin/templates."
+        ),
+    )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        help=(
+            "Repo-root-relative directory or file to include even when it would "
+            "normally be skipped, for example --include third_party/templates."
+        ),
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help=(
+            "Repo-root-relative directory or file to skip for this scan. Repeat "
+            "for multiple paths."
+        ),
+    )
+    parser.add_argument(
+        "--scope-note",
+        default="",
+        help="User-provided scan intent, such as 'dag and plugin templates are the core mining scripts'.",
+    )
     return parser.parse_args()
 
 
@@ -189,18 +221,65 @@ def is_text_candidate(path: Path) -> bool:
     return stem in DOC_NAMES
 
 
-def iter_files(root: Path, max_files: int) -> Iterable[Path]:
+def normalize_scope_paths(values: list[str]) -> tuple[str, ...]:
+    normalized = []
+    for value in values:
+        path = value.replace("\\", "/").strip().strip("/")
+        if path:
+            normalized.append(path.lower())
+    return tuple(normalized)
+
+
+def path_matches_scope(path: Path, root: Path, scopes: tuple[str, ...]) -> bool:
+    if not scopes:
+        return False
+    relative = rel(path, root).lower()
+    return any(relative == scope or relative.startswith(f"{scope}/") for scope in scopes)
+
+
+def dir_matches_scope(dirpath: str, root: Path, scopes: tuple[str, ...]) -> bool:
+    if not scopes:
+        return False
+    path = Path(dirpath)
+    try:
+        relative = path.relative_to(root).as_posix().lower()
+    except ValueError:
+        return False
+    if relative == ".":
+        return False
+    return any(relative == scope or relative.startswith(f"{scope}/") for scope in scopes)
+
+
+def iter_files(
+    root: Path,
+    max_files: int,
+    focus_paths: tuple[str, ...],
+    include_paths: tuple[str, ...],
+    exclude_paths: tuple[str, ...],
+) -> Iterable[Path]:
     buckets: dict[str, list[Path]] = {"doc": [], "manifest": [], "config": [], "source": [], "test": [], "other": []}
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".idea"))
+        kept_dirs = []
+        for dirname in sorted(dirnames):
+            child = Path(dirpath) / dirname
+            if dir_matches_scope(str(child), root, exclude_paths):
+                continue
+            if dirname.startswith(".idea"):
+                continue
+            if dirname in SKIP_DIRS and not dir_matches_scope(str(child), root, include_paths):
+                continue
+            kept_dirs.append(dirname)
+        dirnames[:] = kept_dirs
         for filename in sorted(filenames):
             path = Path(dirpath) / filename
+            if path_matches_scope(path, root, exclude_paths):
+                continue
             if not is_text_candidate(path):
                 continue
             buckets[classify(path, root)].append(path)
 
     for paths in buckets.values():
-        paths.sort(key=lambda path: priority_key(path, root))
+        paths.sort(key=lambda path: priority_key(path, root, focus_paths, include_paths))
 
     # Docs, manifests, and config files carry more convention signal than arbitrary source files.
     ordered: list[Path] = []
@@ -209,11 +288,17 @@ def iter_files(root: Path, max_files: int) -> Iterable[Path]:
     yield from ordered[:max_files]
 
 
-def priority_key(path: Path, root: Path) -> tuple[int, int, str]:
+def priority_key(
+    path: Path, root: Path, focus_paths: tuple[str, ...], include_paths: tuple[str, ...]
+) -> tuple[int, int, str]:
     rel_parts = path.relative_to(root).parts
     parts = {part.lower() for part in rel_parts}
     name = path.name.lower()
-    if name.startswith("readme") or name.startswith("contributing"):
+    in_focus = path_matches_scope(path, root, focus_paths)
+    in_include = path_matches_scope(path, root, include_paths)
+    if in_focus:
+        tier = 0
+    elif name.startswith("readme") or name.startswith("contributing"):
         tier = 0
     elif "docs" in parts or "tutorial" in parts:
         tier = 1
@@ -229,7 +314,8 @@ def priority_key(path: Path, root: Path) -> tuple[int, int, str]:
         tier = 6
     else:
         tier = 7
-    return (tier, len(rel_parts), path.as_posix())
+    scope_rank = 0 if in_focus else 1 if in_include else 2
+    return (scope_rank, tier, len(rel_parts), path.as_posix())
 
 
 def read_text(path: Path, max_bytes: int) -> str:
@@ -502,6 +588,8 @@ def task_playbook_block(
     source_paths: list[str],
     test_paths: list[str],
     commands: list[str],
+    focus_paths: tuple[str, ...],
+    scope_note: str,
 ) -> str:
     mappings = []
     for source_path in source_paths[:30]:
@@ -522,11 +610,18 @@ apply edits and verify drift.
 ## Default Flow
 
 1. Identify the task category from the user's request.
-2. Consult the source-to-test map below to choose the likely implementation and
+2. If the task touches the focus scope, start with the focus paths before
+   generic framework directories.
+3. Consult the source-to-test map below to choose the likely implementation and
    verification files.
-3. Apply the smallest change in the user's checkout.
-4. Run the narrowest relevant command first.
-5. Escalate to broader tests only when shared behavior changes.
+4. Apply the smallest change in the user's checkout.
+5. Run the narrowest relevant command first.
+6. Escalate to broader tests only when shared behavior changes.
+
+## Focus Scope
+
+- User scope note: {scope_note or "None provided."}
+- Focus paths: {", ".join(f"`{item}`" for item in focus_paths) or "None provided."}
 
 ## Commands
 
@@ -562,6 +657,10 @@ def portable_reference_block(
     config_paths: list[str],
     source_paths: list[str],
     test_paths: list[str],
+    focus_paths: tuple[str, ...],
+    include_paths: tuple[str, ...],
+    exclude_paths: tuple[str, ...],
+    scope_note: str,
 ) -> str:
     repo_name = root.name
     overview = directory_overview(files, root)
@@ -585,6 +684,14 @@ the repository root.
 - Original generation path: intentionally omitted for portability.
 - Use this file as the source of repository conventions. Inspect a user's
   current checkout only for task-specific code context.
+
+## Scan Scope
+
+- User scope note: {scope_note or "None provided."}
+- Focus paths: {", ".join(f"`{item}`" for item in focus_paths) or "None provided."}
+- Extra include paths: {", ".join(f"`{item}`" for item in include_paths) or "None provided."}
+- Extra exclude paths: {", ".join(f"`{item}`" for item in exclude_paths) or "None provided."}
+- Treat focus paths as first-class architecture areas in the generated skill.
 
 ## Directory Overview
 
@@ -790,6 +897,10 @@ def build_markdown(
     files: list[Path],
     knowledge_depth: str,
     max_bytes: int,
+    focus_paths: tuple[str, ...],
+    include_paths: tuple[str, ...],
+    exclude_paths: tuple[str, ...],
+    scope_note: str,
 ) -> str:
     repo_name = root.name
     files_by_kind: dict[str, list[Path]] = {"doc": [], "manifest": [], "config": [], "source": [], "test": [], "other": []}
@@ -823,6 +934,10 @@ def build_markdown(
         config_paths,
         source_paths,
         test_paths,
+        focus_paths,
+        include_paths,
+        exclude_paths,
+        scope_note,
     )
     source_map = ""
     task_playbook = ""
@@ -831,7 +946,9 @@ def build_markdown(
         source_map = source_map_block(
             root, files_by_kind["source"], files_by_kind["test"], max_bytes
         )
-        task_playbook = task_playbook_block(root, source_paths, test_paths, commands)
+        task_playbook = task_playbook_block(
+            root, source_paths, test_paths, commands, focus_paths, scope_note
+        )
 
     return f"""# Repo Skill Draft: {skill_name}
 
@@ -843,6 +960,14 @@ Knowledge depth: `{knowledge_depth}`
 
 Portability: generated skill content must use repo-root-relative paths and must
 not depend on the absolute generation path.
+
+User scan scope: {scope_note or "not provided"}
+
+Focus paths: {", ".join(f"`{item}`" for item in focus_paths) or "none"}
+
+Extra include paths: {", ".join(f"`{item}`" for item in include_paths) or "none"}
+
+Extra exclude paths: {", ".join(f"`{item}`" for item in exclude_paths) or "none"}
 
 ## Scan Summary
 
@@ -896,6 +1021,7 @@ not depend on the absolute generation path.
 - Test fixture and mock conventions
 - Generated, vendored, migration, or lock files that require special handling
 - Risky commands or files future agents should avoid changing casually
+- Preserve the user-provided focus scope in the final skill.
 - Replace placeholders in the portable reference before sharing the generated skill.
 - Do not ship a generated skill that tells future users to inspect the original local repository path.
 
@@ -934,9 +1060,23 @@ def main() -> int:
         return 2
 
     skill_name = normalize_skill_name(args.skill_name)
-    files = list(iter_files(root, args.max_files))
+    focus_paths = normalize_scope_paths(args.focus)
+    include_paths = normalize_scope_paths(args.include)
+    exclude_paths = normalize_scope_paths(args.exclude)
+    files = list(
+        iter_files(root, args.max_files, focus_paths, include_paths, exclude_paths)
+    )
     markdown = build_markdown(
-        root, skill_name, args.target, files, args.knowledge_depth, args.max_bytes
+        root,
+        skill_name,
+        args.target,
+        files,
+        args.knowledge_depth,
+        args.max_bytes,
+        focus_paths,
+        include_paths,
+        exclude_paths,
+        args.scope_note,
     )
 
     if args.output:

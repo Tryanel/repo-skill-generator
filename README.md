@@ -118,6 +118,34 @@ python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-d
 `--knowledge-depth portable` only when you want a lighter conventions-only
 draft.
 
+### Custom Scan Scope
+
+Some repositories hide the important logic outside common directories like
+`src/` or `app/`. For example, a data-mining framework might keep its core
+workflows in `dag/` and database templates under `plugin/templates/`.
+
+Use scope flags to tell the scanner what matters:
+
+```bash
+python scripts/draft_repo_skill.py \
+  --repo /path/to/mining-framework \
+  --skill-name mining-framework-dev \
+  --target all \
+  --focus dag \
+  --focus plugin/templates \
+  --scope-note "dag contains the core mining scripts; plugin/templates contains database templates" \
+  --output mining-framework-skill-draft.md
+```
+
+Available scope flags:
+
+- `--focus PATH`: Treat this repo-root-relative file or directory as core.
+  Repeat it for multiple paths.
+- `--include PATH`: Include a path even if it would normally be skipped.
+- `--exclude PATH`: Skip a path for this scan.
+- `--scope-note TEXT`: Record the user's explanation of what matters, and
+  preserve it in the generated references.
+
 ## Workflow
 
 1. Run the scanner against the target repository.
