@@ -163,6 +163,16 @@ def parse_args() -> argparse.Namespace:
             "and task-playbook references. Defaults to self-contained."
         ),
     )
+    parser.add_argument(
+        "--skill-purpose",
+        choices=("capability", "development"),
+        default="capability",
+        help=(
+            "capability generates a skill for recreating repository capabilities "
+            "as standalone scripts; development generates a skill for modifying "
+            "the original repository. Defaults to capability."
+        ),
+    )
     parser.add_argument("--output", help="Markdown draft path. Writes to stdout when omitted.")
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting --output if it exists.")
     parser.add_argument("--max-files", type=int, default=300, help="Maximum text-like files to inspect.")
@@ -198,6 +208,24 @@ def parse_args() -> argparse.Namespace:
         "--scope-note",
         default="",
         help="User-provided scan intent, such as 'dag and plugin templates are the core mining scripts'.",
+    )
+    parser.add_argument(
+        "--script-focus",
+        action="append",
+        default=[],
+        help=(
+            "Repo-root-relative file, directory, or operation label whose behavior "
+            "should be turned into callable scripts in the generated skill. Repeat "
+            "for multiple script candidates."
+        ),
+    )
+    parser.add_argument(
+        "--script-note",
+        default="",
+        help=(
+            "User-provided instruction for what to expose as generated skill "
+            "scripts, such as 'make SQL rendering and DAG scheduling callable'."
+        ),
     )
     return parser.parse_args()
 
@@ -447,6 +475,39 @@ def role_map(paths: list[str], role: str) -> list[str]:
     return [f"{path}: {role}" for path in paths]
 
 
+def infer_capability_role(path: str) -> str:
+    lowered = path.lower()
+    if any(token in lowered for token in ("dag", "workflow", "pipeline", "flow")):
+        return "workflow orchestration or data pipeline capability"
+    if any(token in lowered for token in ("plugin", "template", "sql", "query", "database", "db")):
+        return "plugin, template, SQL, or database integration capability"
+    if any(token in lowered for token in ("script", "job", "task", "worker")):
+        return "scripted job or task execution capability"
+    if any(token in lowered for token in ("model", "feature", "mine", "mining", "extract")):
+        return "data mining, feature extraction, or modeling capability"
+    if any(token in lowered for token in ("api", "client", "connector", "adapter")):
+        return "API, connector, adapter, or integration capability"
+    if any(token in lowered for token in ("config", "conf", "yaml", "json", "toml")):
+        return "configuration-driven behavior"
+    return "repository capability evidence"
+
+
+def capability_inventory(paths: list[str], focus_paths: tuple[str, ...]) -> list[str]:
+    selected = []
+    seen = set()
+    for path in paths:
+        if focus_paths and not any(path.lower() == f or path.lower().startswith(f"{f}/") for f in focus_paths):
+            continue
+        if path not in seen:
+            seen.add(path)
+            selected.append(path)
+
+    if not selected:
+        selected = paths[:30]
+
+    return [f"{path}: {infer_capability_role(path)}" for path in selected[:40]]
+
+
 def first_sentence(text: str | None, limit: int = 180) -> str:
     if not text:
         return ""
@@ -580,6 +641,366 @@ generation checkout. Paths are repo-root-relative.
 
 {chr(10).join(test_sections)}
 ```
+"""
+
+
+def capability_map_block(
+    root: Path,
+    commands: list[str],
+    tooling: list[str],
+    doc_paths: list[str],
+    manifest_paths: list[str],
+    config_paths: list[str],
+    source_paths: list[str],
+    test_paths: list[str],
+    focus_paths: tuple[str, ...],
+    include_paths: tuple[str, ...],
+    exclude_paths: tuple[str, ...],
+    scope_note: str,
+    script_focus_paths: tuple[str, ...],
+    script_note: str,
+) -> str:
+    all_evidence = source_paths + config_paths + doc_paths + manifest_paths
+    inventory = capability_inventory(all_evidence, focus_paths)
+    return f"""```markdown
+# Capability Map
+
+This reference captures what the repository can do, with emphasis on the
+user-specified focus scope. Use it to recreate equivalent standalone scripts or
+tools without depending on the original repository checkout.
+
+## User Intent And Scope
+
+- User scope note: {scope_note or "None provided."}
+- Focus paths: {", ".join(f"`{item}`" for item in focus_paths) or "None provided."}
+- Extra include paths: {", ".join(f"`{item}`" for item in include_paths) or "None provided."}
+- Extra exclude paths: {", ".join(f"`{item}`" for item in exclude_paths) or "None provided."}
+- Requested script targets: {", ".join(f"`{item}`" for item in script_focus_paths) or "None provided."}
+- Script note: {script_note or "None provided."}
+
+## Capability Inventory
+
+{bullet_list(inventory, "No capability evidence detected.", quote=False)}
+
+## Runtime And Tooling Evidence
+
+{bullet_list(tooling)}
+
+## Commands And Entrypoints
+
+{bullet_list(commands, "No commands detected. Fill exact execution commands manually from docs or scripts.")}
+
+## Inputs To Extract
+
+- Configuration files, environment variables, CLI flags, DAG definitions,
+  templates, SQL files, schemas, and plugin metadata from the focus scope.
+- Example inputs from tests, examples, fixtures, or documentation.
+- External service assumptions such as databases, queues, APIs, object stores,
+  schedulers, or model runtimes.
+
+## Outputs To Reproduce
+
+- Files, database writes, reports, API calls, logs, metrics, generated SQL,
+  transformed datasets, or scheduled jobs produced by the focused capability.
+- Error behavior and retry/fallback behavior visible in source or tests.
+
+## Evidence Files
+
+### Docs
+
+{bullet_list(doc_paths)}
+
+### Manifests
+
+{bullet_list(manifest_paths)}
+
+### Configs And Templates
+
+{bullet_list(config_paths)}
+
+### Source
+
+{bullet_list(source_paths)}
+
+### Tests And Fixtures
+
+{bullet_list(test_paths)}
+
+## Gaps To Fill Before Shipping
+
+- Name each major capability in plain language.
+- Record input and output contracts for each capability.
+- Record algorithmic steps and decision rules, not just file names.
+- Record external dependencies and mock/substitute strategies.
+```
+"""
+
+
+def implementation_blueprint_block(
+    commands: list[str],
+    source_paths: list[str],
+    test_paths: list[str],
+    focus_paths: tuple[str, ...],
+    scope_note: str,
+    script_focus_paths: tuple[str, ...],
+    script_note: str,
+) -> str:
+    mappings = []
+    for source_path in source_paths[:30]:
+        tests = likely_test_targets(source_path, test_paths)
+        test_text = ", ".join(f"`{test}`" for test in tests) if tests else "no direct test match detected"
+        mappings.append(f"- `{source_path}` -> {test_text}")
+
+    mapping_text = "\n".join(mappings) if mappings else "- No source-to-test map detected."
+
+    return f"""```markdown
+# Implementation Blueprint
+
+Use this blueprint to write new standalone scripts or tools with capabilities
+equivalent to the focused repository areas. Do not import the original project
+or rely on the original checkout unless the user explicitly asks for a wrapper.
+
+## Scope
+
+- User scope note: {scope_note or "None provided."}
+- Focus paths: {", ".join(f"`{item}`" for item in focus_paths) or "None provided."}
+- Requested script targets: {", ".join(f"`{item}`" for item in script_focus_paths) or "None provided."}
+- Script note: {script_note or "None provided."}
+
+## Reimplementation Flow
+
+1. Pick the capability from `capability-map.md`.
+2. Use `source-map.md` to identify the relevant algorithms, templates,
+   configuration, and tests.
+3. Define a standalone interface: CLI command, function API, config file,
+   or script entrypoint.
+4. Recreate behavior from observed contracts: inputs, outputs, transforms,
+   database templates, scheduling semantics, retries, and error handling.
+5. Replace framework-specific dependencies with small adapters or standard
+   library equivalents when possible.
+6. Create parity tests from original tests, examples, templates, or sample
+   data. Do not require the original repository at runtime.
+7. Document any missing behavior as an explicit assumption.
+8. If the user requested generated scripts, implement and test them under
+   `scripts/` before sharing the skill. Do not ship scripts that still raise
+   `NotImplementedError`.
+
+## Suggested Standalone Script Shape
+
+- `main(...)` or `run(...)` entrypoint.
+- Small dataclasses or typed dictionaries for config and records.
+- Pure functions for parsing, transformation, template rendering, and output.
+- Adapter layer for databases, APIs, object stores, schedulers, or filesystem
+  writes.
+- CLI wrapper only at the edge.
+
+## Verification
+
+{bullet_list(commands, "No repository command detected. Build parity tests from source examples and expected outputs.")}
+
+## Source-To-Test Evidence
+
+{mapping_text}
+
+## Dependency Policy
+
+- Prefer standard library or minimal dependencies for the recreated script.
+- Use original dependencies only when they are essential to the capability.
+- Isolate external services behind adapters so tests can use local fixtures.
+- Preserve security-sensitive behavior such as credential handling, SQL
+  parameterization, path validation, and destructive-operation guards.
+```
+"""
+
+
+def script_filename_from_scope(scope: str, used: set[str]) -> str:
+    clean = scope.replace("\\", "/").strip().strip("/")
+    parts = [part for part in clean.split("/") if part and part not in {".", ".."}]
+    if not parts:
+        parts = ["repo_capability"]
+    if "." in parts[-1]:
+        stems = [Path(parts[-1]).stem]
+    else:
+        stems = parts[-2:]
+    base = "_".join(stems)
+    base = re.sub(r"[^A-Za-z0-9]+", "_", base).strip("_").lower()
+    base = re.sub(r"_{2,}", "_", base) or "repo_capability"
+    if not base.endswith("_tool"):
+        base = f"{base}_tool"
+    name = f"{base}.py"
+    if name not in used:
+        used.add(name)
+        return name
+    index = 2
+    while True:
+        candidate = f"{base}_{index}.py"
+        if candidate not in used:
+            used.add(candidate)
+            return candidate
+        index += 1
+
+
+def paths_for_scope(root: Path, files: list[Path], scope: str, limit: int = 8) -> list[str]:
+    scope_norm = scope.replace("\\", "/").strip().strip("/").lower()
+    matches = []
+    for path in files:
+        relative = rel(path, root)
+        lowered = relative.lower()
+        if lowered == scope_norm or lowered.startswith(f"{scope_norm}/"):
+            matches.append(relative)
+
+    if not matches:
+        candidate = root / scope
+        if candidate.exists():
+            try:
+                matches.append(rel(candidate, root))
+            except ValueError:
+                pass
+
+    def rank(path: str) -> tuple[int, int, str]:
+        suffix = Path(path).suffix.lower()
+        if suffix in SOURCE_EXTS:
+            tier = 0
+        elif suffix in {".sql", ".yaml", ".yml", ".json", ".toml"}:
+            tier = 1
+        elif suffix == ".md":
+            tier = 3
+        else:
+            tier = 2
+        return (tier, path.count("/"), path)
+
+    return sorted(dict.fromkeys(matches), key=rank)[:limit]
+
+
+def starter_script_code(script_path: str, evidence_paths: list[str]) -> str:
+    evidence_json = json.dumps(evidence_paths or ["Fill from capability-map.md"], indent=4)
+    return f'''#!/usr/bin/env python3
+"""Standalone helper distilled for {script_path}.
+
+Implement this file from the generated skill's bundled references before
+sharing the skill. Keep it independent from the original repository checkout.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import Any
+
+
+EVIDENCE_PATHS: list[str] = {evidence_json}
+
+
+def run(input_path: str | None = None, config_path: str | None = None) -> dict[str, Any]:
+    """Execute the recreated capability.
+
+    Replace this body with behavior distilled from EVIDENCE_PATHS,
+    `references/capability-map.md`, and `references/source-map.md`.
+    """
+    raise NotImplementedError("Implement and test this distilled capability before shipping.")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--input", dest="input_path", help="Optional input file or directory.")
+    parser.add_argument("--config", dest="config_path", help="Optional config file.")
+    parser.add_argument("--output", help="Optional JSON output path.")
+    args = parser.parse_args(argv)
+
+    result = run(args.input_path, args.config_path)
+    text = json.dumps(result, ensure_ascii=False, indent=2)
+    if args.output:
+        Path(args.output).write_text(text + "\\n", encoding="utf-8")
+    else:
+        print(text)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def callable_scripts_block(
+    root: Path,
+    files: list[Path],
+    source_paths: list[str],
+    focus_paths: tuple[str, ...],
+    script_focus_paths: tuple[str, ...],
+    script_note: str,
+) -> str:
+    if not script_focus_paths:
+        candidate_scopes = list(focus_paths) or source_paths[:8]
+        candidates = [f"{scope}: {infer_capability_role(scope)}" for scope in candidate_scopes[:12]]
+        return f"""~~~markdown
+# Callable Scripts
+
+No `--script-focus` paths were provided. If the generated skill should include
+callable helpers, choose stable, repeatable capabilities and rerun the scanner
+with one or more `--script-focus PATH` values.
+
+## Candidate Areas
+
+{bullet_list(candidates, "No script candidates detected.", quote=False)}
+
+## Shipping Rule
+
+Only include files under `scripts/` after implementing and testing them. Do not
+ship placeholder scripts, absolute generation paths, or imports from the
+original repository checkout unless the user explicitly asked for a wrapper.
+~~~
+"""
+
+    used_names: set[str] = set()
+    contract_lines = []
+    starter_sections = []
+    for scope in script_focus_paths[:8]:
+        script_name = script_filename_from_scope(scope, used_names)
+        script_path = f"scripts/{script_name}"
+        evidence = paths_for_scope(root, files, scope)
+        role = infer_capability_role(scope)
+        evidence_text = ", ".join(f"`{item}`" for item in evidence) if evidence else "no direct scanned file match"
+        contract_lines.append(f"- `{script_path}`: recreate `{scope}` as {role}; evidence: {evidence_text}")
+        starter_sections.append(
+            f"""## `{script_path}`
+
+```python
+{starter_script_code(script_path, evidence).rstrip()}
+```"""
+        )
+
+    return f"""~~~markdown
+# Callable Scripts
+
+Use this reference when the generated skill should ship executable helpers under
+`scripts/`. The scanner can only draft contracts and starter shapes; before
+sharing the final skill, implement the behavior from the bundled capability map
+and source map, then test each script.
+
+## User Script Note
+
+{script_note or "None provided."}
+
+## Requested Script Contracts
+
+{chr(10).join(contract_lines)}
+
+## Starter Script Templates
+
+{chr(10).join(starter_sections)}
+
+## Shipping Rule
+
+- Keep scripts standalone and portable.
+- Do not import the original repository unless the user explicitly requested a
+  wrapper around that repository.
+- Preserve security-sensitive behavior such as credential handling, SQL
+  parameterization, path validation, and destructive-operation guards.
+- Run each script with `--help` and at least one fixture or parity test before
+  distributing the generated skill.
+- Do not ship scripts that still raise `NotImplementedError`.
+~~~
 """
 
 
@@ -777,14 +1198,24 @@ def platform_install_notes(skill_name: str, target: str) -> list[str]:
     ]
 
 
-def platform_frontmatter(skill_name: str, repo_name: str, target: str) -> str:
+def platform_frontmatter(
+    skill_name: str, repo_name: str, target: str, skill_purpose: str
+) -> str:
     subject = platform_subject(target)
-    description = (
-        f"Work in the {repo_name} repository using its observed development "
-        f"conventions. Use when {subject} needs to modify, review, test, debug, "
-        "or explain code in this repository while following its README, "
-        "architecture, commands, style, and test practices."
-    )
+    if skill_purpose == "capability":
+        description = (
+            f"Recreate capabilities learned from the {repo_name} repository as "
+            f"standalone scripts or tools. Use when {subject} needs to implement "
+            "equivalent workflows, templates, data transforms, integrations, or "
+            "domain scripts without depending on the original repository checkout."
+        )
+    else:
+        description = (
+            f"Work in the {repo_name} repository using its observed development "
+            f"conventions. Use when {subject} needs to modify, review, test, debug, "
+            "or explain code in this repository while following its README, "
+            "architecture, commands, style, and test practices."
+        )
     if target == "opencode":
         return (
             "---\n"
@@ -792,7 +1223,7 @@ def platform_frontmatter(skill_name: str, repo_name: str, target: str) -> str:
             f"description: {description}\n"
             "metadata:\n"
             f"  repo: {repo_name}\n"
-            "  kind: repo-development\n"
+            f"  kind: repo-{skill_purpose}\n"
             "---"
         )
     return (
@@ -804,33 +1235,109 @@ def platform_frontmatter(skill_name: str, repo_name: str, target: str) -> str:
 
 
 def make_skill_draft(
-    skill_name: str, repo_name: str, target: str, knowledge_depth: str
+    skill_name: str,
+    repo_name: str,
+    target: str,
+    knowledge_depth: str,
+    skill_purpose: str,
 ) -> str:
     display = skill_name.replace("-", " ").title()
     subject = platform_subject(target)
     article = platform_article(target)
-    frontmatter = platform_frontmatter(skill_name, repo_name, target)
+    frontmatter = platform_frontmatter(skill_name, repo_name, target, skill_purpose)
     if knowledge_depth == "self-contained":
-        reference_step = (
-            "Read the bundled `references/repo-conventions.md`, "
-            "`references/source-map.md`, and `references/task-playbook.md` before "
-            "making non-trivial changes."
-        )
-        playbook_step = (
-            "Use the bundled task playbook to choose the likely implementation and "
-            "tests before opening files."
-        )
+        if skill_purpose == "capability":
+            reference_step = (
+                "Read the bundled `references/capability-map.md`, "
+                "`references/source-map.md`, `references/implementation-blueprint.md`, "
+                "`references/repo-conventions.md`, and optional "
+                "`references/callable-scripts.md` before writing scripts."
+            )
+            playbook_step = (
+                "Use the capability map and implementation blueprint to design a "
+                "standalone script before opening or copying source code."
+            )
+        else:
+            reference_step = (
+                "Read the bundled `references/repo-conventions.md`, "
+                "`references/source-map.md`, and `references/task-playbook.md` before "
+                "making non-trivial changes."
+            )
+            playbook_step = (
+                "Use the bundled task playbook to choose the likely implementation and "
+                "tests before opening files."
+            )
         missing_reference_text = "any bundled reference is missing"
     else:
-        reference_step = (
-            "Read the bundled `references/repo-conventions.md` before making "
-            "non-trivial changes."
-        )
-        playbook_step = (
-            "Use the bundled conventions to choose likely implementation and test "
-            "areas before opening files."
-        )
+        if skill_purpose == "capability":
+            reference_step = (
+                "Read the bundled `references/capability-map.md` and "
+                "`references/repo-conventions.md`, plus optional "
+                "`references/callable-scripts.md`, before writing scripts."
+            )
+            playbook_step = (
+                "Use the bundled capability notes to design the standalone script."
+            )
+        else:
+            reference_step = (
+                "Read the bundled `references/repo-conventions.md` before making "
+                "non-trivial changes."
+            )
+            playbook_step = (
+                "Use the bundled conventions to choose likely implementation and test "
+                "areas before opening files."
+            )
         missing_reference_text = "`references/repo-conventions.md` is missing"
+    if skill_purpose == "capability":
+        overview = (
+            "Use the bundled repository knowledge to recreate focused capabilities "
+            "as standalone scripts or tools. This skill is portable: it must not "
+            "depend on the original local repository path used during generation."
+        )
+        checkout_step = (
+            "Open a checkout only to verify drift or inspect missing details; do "
+            "not require the original repository at runtime."
+        )
+        output_rule = (
+            "Do not import or depend on the original repository unless the user "
+            "explicitly asks for a wrapper around it."
+        )
+        workflow_tail = (
+            "5. Use the commands, contracts, templates, and test evidence recorded in the bundled references.\n"
+            "6. Prefer simple standalone interfaces and minimal dependencies.\n"
+            "7. Preserve behavior, inputs, outputs, validation, and error handling described in the capability references.\n"
+            "8. Build parity tests from examples, fixtures, templates, and observed expected outputs.\n"
+            "9. If completed helper scripts are bundled under `scripts/`, prefer reusing them for matching operations and keep their behavior portable."
+        )
+        script_rule = (
+            "Do not treat script starter templates as complete tools; bundled "
+            "scripts must be implemented and tested."
+        )
+    else:
+        overview = (
+            "Use the bundled repository conventions before making changes. This "
+            "skill is portable: it must not depend on the original local repository "
+            "path used during generation."
+        )
+        checkout_step = (
+            "Open the user's checkout only to apply edits, verify drift, or inspect "
+            "code that is missing from the bundled knowledge pack."
+        )
+        output_rule = (
+            "Do not introduce new dependencies, frameworks, or file organization "
+            "patterns without repository evidence."
+        )
+        workflow_tail = (
+            "5. Use the commands, conventions, and test evidence recorded in the bundled references.\n"
+            "6. Follow existing repository interfaces, dependencies, naming, and file organization.\n"
+            "7. Preserve behavior, validation, and error handling unless the user asks for a behavior change.\n"
+            "8. Add or update tests that match the repository's observed testing style.\n"
+            "9. If completed helper scripts are bundled under `scripts/`, use them only for their documented repeatable operations."
+        )
+        script_rule = (
+            "Do not rely on script starter templates as repository facts; bundled "
+            "scripts must be implemented and tested."
+        )
     return f"""```markdown
 {frontmatter}
 
@@ -838,24 +1345,22 @@ def make_skill_draft(
 
 ## Overview
 
-Use the bundled repository conventions before making changes. This skill is portable: it must not depend on the original local repository path used during generation.
+{overview}
 
 ## Workflow
 
 1. {reference_step}
 2. Do not fetch, reopen, or depend on the original repository path used to generate this skill.
 3. {playbook_step}
-4. Open the user's checkout only to apply edits, verify drift, or inspect code that is missing from the bundled knowledge pack.
-5. Use the setup, build, lint, format, and test commands recorded in the bundled reference.
-6. Prefer local helpers, tests, and conventions over new abstractions.
-7. Keep edits scoped to the relevant subsystem and preserve generated or vendored files unless the repo explicitly instructs otherwise.
-8. Run the narrowest meaningful tests first, then broader checks when shared behavior changes.
+4. {checkout_step}
+{workflow_tail}
 
 ## Output Rules
 
 - Cite exact files, commands, or conventions when explaining repository-specific decisions.
 - Mark uncertain conventions as assumptions instead of presenting them as rules.
-- Do not introduce new dependencies, frameworks, or file organization patterns without repository evidence.
+- {output_rule}
+- {script_rule}
 - Use this as {article} {subject} skill and keep platform-specific metadata minimal.
 - If {missing_reference_text} or still contains placeholder text, say the skill is incomplete instead of rediscovering conventions from the original generation repo.
 ```
@@ -863,7 +1368,7 @@ Use the bundled repository conventions before making changes. This skill is port
 
 
 def build_platform_sections(
-    root: Path, skill_name: str, target: str, knowledge_depth: str
+    root: Path, skill_name: str, target: str, knowledge_depth: str, skill_purpose: str
 ) -> str:
     targets = TARGETS if target == "all" else (target,)
     sections = []
@@ -873,7 +1378,7 @@ def build_platform_sections(
             platform_install_notes(platform_skill_name, platform), quote=False
         )
         skill_block = make_skill_draft(
-            platform_skill_name, root.name, platform, knowledge_depth
+            platform_skill_name, root.name, platform, knowledge_depth, skill_purpose
         )
         title = platform_subject(platform)
         sections.append(
@@ -901,6 +1406,9 @@ def build_markdown(
     include_paths: tuple[str, ...],
     exclude_paths: tuple[str, ...],
     scope_note: str,
+    skill_purpose: str,
+    script_focus_paths: tuple[str, ...],
+    script_note: str,
 ) -> str:
     repo_name = root.name
     files_by_kind: dict[str, list[Path]] = {"doc": [], "manifest": [], "config": [], "source": [], "test": [], "other": []}
@@ -922,7 +1430,7 @@ def build_markdown(
 
     counts = Counter(classify(path, root) for path in files)
     platform_sections = build_platform_sections(
-        root, skill_name, target, knowledge_depth
+        root, skill_name, target, knowledge_depth, skill_purpose
     )
     portable_reference = portable_reference_block(
         root,
@@ -941,6 +1449,9 @@ def build_markdown(
     )
     source_map = ""
     task_playbook = ""
+    capability_map = ""
+    implementation_blueprint = ""
+    callable_scripts = ""
 
     if knowledge_depth == "self-contained":
         source_map = source_map_block(
@@ -950,6 +1461,41 @@ def build_markdown(
             root, source_paths, test_paths, commands, focus_paths, scope_note
         )
 
+    if skill_purpose == "capability":
+        capability_map = capability_map_block(
+            root,
+            commands,
+            tooling,
+            doc_paths,
+            manifest_paths,
+            config_paths,
+            source_paths,
+            test_paths,
+            focus_paths,
+            include_paths,
+            exclude_paths,
+            scope_note,
+            script_focus_paths,
+            script_note,
+        )
+        implementation_blueprint = implementation_blueprint_block(
+            commands,
+            source_paths,
+            test_paths,
+            focus_paths,
+            scope_note,
+            script_focus_paths,
+            script_note,
+        )
+        callable_scripts = callable_scripts_block(
+            root,
+            files,
+            source_paths,
+            focus_paths,
+            script_focus_paths,
+            script_note,
+        )
+
     return f"""# Repo Skill Draft: {skill_name}
 
 Repository name: `{repo_name}`
@@ -957,6 +1503,8 @@ Repository name: `{repo_name}`
 Target: `{target}`
 
 Knowledge depth: `{knowledge_depth}`
+
+Skill purpose: `{skill_purpose}`
 
 Portability: generated skill content must use repo-root-relative paths and must
 not depend on the absolute generation path.
@@ -968,6 +1516,10 @@ Focus paths: {", ".join(f"`{item}`" for item in focus_paths) or "none"}
 Extra include paths: {", ".join(f"`{item}`" for item in include_paths) or "none"}
 
 Extra exclude paths: {", ".join(f"`{item}`" for item in exclude_paths) or "none"}
+
+Script focus paths: {", ".join(f"`{item}`" for item in script_focus_paths) or "none"}
+
+Script note: {script_note or "not provided"}
 
 ## Scan Summary
 
@@ -1036,12 +1588,33 @@ sections with observed facts before sharing it.
 
 {portable_reference}
 
+## Capability `references/capability-map.md`
+
+Copy this capability map into the generated skill when the purpose is
+`capability`.
+
+{capability_map or "Not generated. Re-run with `--skill-purpose capability`."}
+
 ## Self-Contained `references/source-map.md`
 
 Copy this bundled source map into the generated skill when using
 `--knowledge-depth self-contained`.
 
 {source_map or "Not generated. Re-run with `--knowledge-depth self-contained`."}
+
+## Capability `references/implementation-blueprint.md`
+
+Copy this implementation blueprint into the generated skill when the purpose is
+`capability`.
+
+{implementation_blueprint or "Not generated. Re-run with `--skill-purpose capability`."}
+
+## Capability `references/callable-scripts.md`
+
+Copy this script reference into the generated skill when the user wants
+callable helpers. Implement final files under `scripts/` before sharing.
+
+{callable_scripts or "Not generated. Re-run with `--skill-purpose capability`."}
 
 ## Self-Contained `references/task-playbook.md`
 
@@ -1063,6 +1636,7 @@ def main() -> int:
     focus_paths = normalize_scope_paths(args.focus)
     include_paths = normalize_scope_paths(args.include)
     exclude_paths = normalize_scope_paths(args.exclude)
+    script_focus_paths = normalize_scope_paths(args.script_focus)
     files = list(
         iter_files(root, args.max_files, focus_paths, include_paths, exclude_paths)
     )
@@ -1077,6 +1651,9 @@ def main() -> int:
         include_paths,
         exclude_paths,
         args.scope_note,
+        args.skill_purpose,
+        script_focus_paths,
+        args.script_note,
     )
 
     if args.output:
