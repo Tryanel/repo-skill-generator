@@ -140,6 +140,27 @@ SOURCE_EXTS = {
 
 TEST_MARKERS = ("test", "tests", "spec", "__tests__")
 TARGETS = ("codex", "claude", "opencode")
+SCRIPT_LANGUAGES = ("auto", "python", "typescript", "javascript", "go", "rust", "ruby")
+SCRIPT_LANGUAGE_EXTENSIONS = {
+    ".go": "go",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".mjs": "javascript",
+    ".cjs": "javascript",
+    ".py": "python",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+}
+SCRIPT_OUTPUT_EXTENSIONS = {
+    "go": ".go",
+    "javascript": ".js",
+    "python": ".py",
+    "ruby": ".rb",
+    "rust": ".rs",
+    "typescript": ".ts",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -159,8 +180,8 @@ def parse_args() -> argparse.Namespace:
         choices=("portable", "self-contained"),
         default="self-contained",
         help=(
-            "portable bundles conventions only; self-contained also drafts source-map "
-            "and task-playbook references. Defaults to self-contained."
+            "portable bundles conventions only; self-contained also drafts "
+            "generation evidence and task-playbook references. Defaults to self-contained."
         ),
     )
     parser.add_argument(
@@ -169,7 +190,7 @@ def parse_args() -> argparse.Namespace:
         default="capability",
         help=(
             "capability generates a skill for recreating repository capabilities "
-            "as standalone scripts; development generates a skill for modifying "
+            "as same-language callable functions; development generates a skill for modifying "
             "the original repository. Defaults to capability."
         ),
     )
@@ -177,6 +198,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--overwrite", action="store_true", help="Allow overwriting --output if it exists.")
     parser.add_argument("--max-files", type=int, default=300, help="Maximum text-like files to inspect.")
     parser.add_argument("--max-bytes", type=int, default=256_000, help="Maximum bytes to read per file.")
+    parser.add_argument(
+        "--full-scan",
+        action="store_true",
+        help=(
+            "Scan every text-like file that is not skipped by directory rules or "
+            "--exclude, ignoring --max-files. Use this when capabilities may live "
+            "outside common source directories."
+        ),
+    )
     parser.add_argument(
         "--focus",
         action="append",
@@ -227,6 +257,37 @@ def parse_args() -> argparse.Namespace:
             "scripts, such as 'make SQL rendering and DAG scheduling callable'."
         ),
     )
+    parser.add_argument(
+        "--script-output-dir",
+        help=(
+            "Directory where same-language callable function files should be "
+            "written. When omitted, the draft records the planned files but does "
+            "not create them."
+        ),
+    )
+    parser.add_argument(
+        "--script-language",
+        choices=SCRIPT_LANGUAGES,
+        default="auto",
+        help=(
+            "Language for generated callable function files. Defaults to auto, "
+            "which uses script target evidence or the repository's primary source language."
+        ),
+    )
+    parser.add_argument(
+        "--script-api",
+        choices=("function", "cli", "both"),
+        default="function",
+        help=(
+            "Shape of generated function files. Defaults to function for direct "
+            "callable APIs; use both only when a CLI wrapper is also needed."
+        ),
+    )
+    parser.add_argument(
+        "--script-overwrite",
+        action="store_true",
+        help="Allow overwriting files in --script-output-dir.",
+    )
     return parser.parse_args()
 
 
@@ -247,6 +308,27 @@ def is_text_candidate(path: Path) -> bool:
         return True
     stem = path.stem.lower()
     return stem in DOC_NAMES
+
+
+def looks_like_text(path: Path, sample_size: int = 4096) -> bool:
+    try:
+        data = path.read_bytes()[:sample_size]
+    except OSError:
+        return False
+    if not data:
+        return True
+    if b"\x00" in data:
+        return False
+    decoded = data.decode("utf-8", errors="replace")
+    if not decoded:
+        return False
+    replacement_ratio = decoded.count("\ufffd") / max(len(decoded), 1)
+    if replacement_ratio > 0.05:
+        return False
+    control_chars = sum(
+        1 for char in decoded if ord(char) < 32 and char not in "\n\r\t\f\b"
+    )
+    return control_chars / max(len(decoded), 1) < 0.05
 
 
 def normalize_scope_paths(values: list[str]) -> tuple[str, ...]:
@@ -284,6 +366,7 @@ def iter_files(
     focus_paths: tuple[str, ...],
     include_paths: tuple[str, ...],
     exclude_paths: tuple[str, ...],
+    include_unknown_text: bool = False,
 ) -> Iterable[Path]:
     buckets: dict[str, list[Path]] = {"doc": [], "manifest": [], "config": [], "source": [], "test": [], "other": []}
     for dirpath, dirnames, filenames in os.walk(root):
@@ -302,7 +385,9 @@ def iter_files(
             path = Path(dirpath) / filename
             if path_matches_scope(path, root, exclude_paths):
                 continue
-            if not is_text_candidate(path):
+            if not is_text_candidate(path) and not (
+                include_unknown_text and looks_like_text(path)
+            ):
                 continue
             buckets[classify(path, root)].append(path)
 
@@ -313,7 +398,10 @@ def iter_files(
     ordered: list[Path] = []
     for kind in ("doc", "manifest", "config", "test", "source", "other"):
         ordered.extend(buckets[kind])
-    yield from ordered[:max_files]
+    if max_files <= 0:
+        yield from ordered
+    else:
+        yield from ordered[:max_files]
 
 
 def priority_key(
@@ -447,7 +535,7 @@ def detect_tooling(files: list[Path], root: Path) -> list[str]:
 
 def select_recommended(files_by_kind: dict[str, list[Path]], root: Path) -> list[str]:
     selected: list[Path] = []
-    for kind in ("doc", "manifest", "config", "source", "test"):
+    for kind in ("doc", "manifest", "config", "source", "test", "other"):
         selected.extend(files_by_kind.get(kind, [])[:8 if kind in {"source", "test"} else 12])
     seen = set()
     result = []
@@ -653,6 +741,7 @@ def capability_map_block(
     config_paths: list[str],
     source_paths: list[str],
     test_paths: list[str],
+    other_paths: list[str],
     focus_paths: tuple[str, ...],
     include_paths: tuple[str, ...],
     exclude_paths: tuple[str, ...],
@@ -660,14 +749,14 @@ def capability_map_block(
     script_focus_paths: tuple[str, ...],
     script_note: str,
 ) -> str:
-    all_evidence = source_paths + config_paths + doc_paths + manifest_paths
+    all_evidence = source_paths + config_paths + other_paths + doc_paths + manifest_paths
     inventory = capability_inventory(all_evidence, focus_paths)
     return f"""```markdown
 # Capability Map
 
 This reference captures what the repository can do, with emphasis on the
-user-specified focus scope. Use it to recreate equivalent standalone scripts or
-tools without depending on the original repository checkout.
+user-specified focus scope. Use it to recreate equivalent same-language
+functions or tools without depending on the original repository checkout.
 
 ## User Intent And Scope
 
@@ -726,6 +815,10 @@ tools without depending on the original repository checkout.
 
 {bullet_list(test_paths)}
 
+### Other Text Evidence
+
+{bullet_list(other_paths)}
+
 ## Gaps To Fill Before Shipping
 
 - Name each major capability in plain language.
@@ -756,8 +849,8 @@ def implementation_blueprint_block(
     return f"""```markdown
 # Implementation Blueprint
 
-Use this blueprint to write new standalone scripts or tools with capabilities
-equivalent to the focused repository areas. Do not import the original project
+Use this blueprint to write new same-language functions or tools with
+capabilities equivalent to the focused repository areas. Do not import the original project
 or rely on the original checkout unless the user explicitly asks for a wrapper.
 
 ## Scope
@@ -770,10 +863,10 @@ or rely on the original checkout unless the user explicitly asks for a wrapper.
 ## Reimplementation Flow
 
 1. Pick the capability from `capability-map.md`.
-2. Use `source-map.md` to identify the relevant algorithms, templates,
-   configuration, and tests.
-3. Define a standalone interface: CLI command, function API, config file,
-   or script entrypoint.
+2. Use `capability-map.md`, `callable-scripts.md`, tests, examples, and
+   templates to identify the relevant algorithms, configuration, and contracts.
+3. Define a standalone same-language function API first. Add a CLI wrapper only
+   if the user asked for one.
 4. Recreate behavior from observed contracts: inputs, outputs, transforms,
    database templates, scheduling semantics, retries, and error handling.
 5. Replace framework-specific dependencies with small adapters or standard
@@ -781,24 +874,30 @@ or rely on the original checkout unless the user explicitly asks for a wrapper.
 6. Create parity tests from original tests, examples, templates, or sample
    data. Do not require the original repository at runtime.
 7. Document any missing behavior as an explicit assumption.
-8. If the user requested generated scripts, implement and test them under
-   `scripts/` before sharing the skill. Do not ship scripts that still raise
-   `NotImplementedError`.
+8. If the user requested generated scripts, implement and test same-language
+   functions under `scripts/` before sharing the skill. Do not ship functions
+   that still raise placeholder errors.
 
-## Suggested Standalone Script Shape
+## Suggested Standalone Function Shape
 
-- `main(...)` or `run(...)` entrypoint.
+- Direct exported function such as `renderSql(...)`, `buildDag(...)`, or
+  `parse_record(...)`, matching the repository's dominant language.
 - Small dataclasses or typed dictionaries for config and records.
 - Pure functions for parsing, transformation, template rendering, and output.
 - Adapter layer for databases, APIs, object stores, schedulers, or filesystem
   writes.
-- CLI wrapper only at the edge.
+- CLI wrapper only at the edge, and only when requested.
 
 ## Verification
 
 {bullet_list(commands, "No repository command detected. Build parity tests from source examples and expected outputs.")}
 
-## Source-To-Test Evidence
+## Draft-Only Generation Evidence
+
+The following source-to-test map is for the agent creating the skill. It should
+be internalized into capability descriptions, tests, and function behavior; do
+not expose this section to end users unless the user explicitly asks for an
+auditable source map.
 
 {mapping_text}
 
@@ -813,7 +912,7 @@ or rely on the original checkout unless the user explicitly asks for a wrapper.
 """
 
 
-def script_filename_from_scope(scope: str, used: set[str]) -> str:
+def script_base_from_scope(scope: str) -> str:
     clean = scope.replace("\\", "/").strip().strip("/")
     parts = [part for part in clean.split("/") if part and part not in {".", ".."}]
     if not parts:
@@ -825,15 +924,49 @@ def script_filename_from_scope(scope: str, used: set[str]) -> str:
     base = "_".join(stems)
     base = re.sub(r"[^A-Za-z0-9]+", "_", base).strip("_").lower()
     base = re.sub(r"_{2,}", "_", base) or "repo_capability"
-    if not base.endswith("_tool"):
-        base = f"{base}_tool"
-    name = f"{base}.py"
+    if base[0].isdigit():
+        base = f"capability_{base}"
+    return base
+
+
+def snake_identifier(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").lower()
+    value = re.sub(r"_{2,}", "_", value) or "run_capability"
+    if value[0].isdigit():
+        value = f"run_{value}"
+    return value
+
+
+def camel_identifier(value: str) -> str:
+    parts = [part for part in snake_identifier(value).split("_") if part]
+    if not parts:
+        return "runCapability"
+    return parts[0] + "".join(part.capitalize() for part in parts[1:])
+
+
+def pascal_identifier(value: str) -> str:
+    return "".join(part.capitalize() for part in snake_identifier(value).split("_") if part) or "RunCapability"
+
+
+def function_name_from_scope(scope: str, language: str) -> str:
+    base = script_base_from_scope(scope)
+    if language in {"javascript", "typescript"}:
+        return camel_identifier(base)
+    if language == "go":
+        return pascal_identifier(base)
+    return snake_identifier(base)
+
+
+def script_filename_from_scope(scope: str, language: str, used: set[str]) -> str:
+    base = script_base_from_scope(scope)
+    extension = SCRIPT_OUTPUT_EXTENSIONS.get(language, ".py")
+    name = f"{base}{extension}"
     if name not in used:
         used.add(name)
         return name
     index = 2
     while True:
-        candidate = f"{base}_{index}.py"
+        candidate = f"{base}_{index}{extension}"
         if candidate not in used:
             used.add(candidate)
             return candidate
@@ -872,73 +1005,306 @@ def paths_for_scope(root: Path, files: list[Path], scope: str, limit: int = 8) -
     return sorted(dict.fromkeys(matches), key=rank)[:limit]
 
 
-def starter_script_code(script_path: str, evidence_paths: list[str]) -> str:
+def primary_script_language(files: list[Path]) -> str:
+    counts: Counter[str] = Counter()
+    for path in files:
+        language = SCRIPT_LANGUAGE_EXTENSIONS.get(path.suffix.lower())
+        if language:
+            counts[language] += 1
+    if not counts:
+        return "python"
+    return counts.most_common(1)[0][0]
+
+
+def language_for_script_target(
+    root: Path,
+    files: list[Path],
+    scope: str,
+    preferred_language: str,
+) -> str:
+    if preferred_language != "auto":
+        return preferred_language
+    for evidence_path in paths_for_scope(root, files, scope):
+        language = SCRIPT_LANGUAGE_EXTENSIONS.get(Path(evidence_path).suffix.lower())
+        if language:
+            return language
+    return primary_script_language(files)
+
+
+def quoted_list(items: list[str], quote: str = '"') -> str:
+    if not items:
+        return ""
+    return ", ".join(f"{quote}{item}{quote}" for item in items)
+
+
+def python_function_code(
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
     evidence_json = json.dumps(evidence_paths or ["Fill from capability-map.md"], indent=4)
-    return f'''#!/usr/bin/env python3
-"""Standalone helper distilled for {script_path}.
+    cli = ""
+    if api_shape in {"cli", "both"}:
+        cli = f'''
 
-Implement this file from the generated skill's bundled references before
-sharing the skill. Keep it independent from the original repository checkout.
-"""
+def main() -> int:
+    import argparse
+    import json
 
-from __future__ import annotations
-
-import argparse
-import json
-from pathlib import Path
-from typing import Any
-
-
-EVIDENCE_PATHS: list[str] = {evidence_json}
-
-
-def run(input_path: str | None = None, config_path: str | None = None) -> dict[str, Any]:
-    """Execute the recreated capability.
-
-    Replace this body with behavior distilled from EVIDENCE_PATHS,
-    `references/capability-map.md`, and `references/source-map.md`.
-    """
-    raise NotImplementedError("Implement and test this distilled capability before shipping.")
-
-
-def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", dest="input_path", help="Optional input file or directory.")
-    parser.add_argument("--config", dest="config_path", help="Optional config file.")
-    parser.add_argument("--output", help="Optional JSON output path.")
-    args = parser.parse_args(argv)
-
-    result = run(args.input_path, args.config_path)
-    text = json.dumps(result, ensure_ascii=False, indent=2)
-    if args.output:
-        Path(args.output).write_text(text + "\\n", encoding="utf-8")
-    else:
-        print(text)
+    parser.add_argument("--input", dest="input_data", help="Input value or file path.")
+    args = parser.parse_args()
+    result = {function_name}(args.input_data)
+    print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 '''
+    return f'''"""Standalone callable functions distilled for {script_path}.
+
+Fill this module from bundled skill references before sharing the generated
+skill. Keep it independent from the original repository checkout.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+
+EVIDENCE_PATHS: tuple[str, ...] = tuple({evidence_json})
+
+
+def {function_name}(input_data: Any = None, config: dict[str, Any] | None = None) -> Any:
+    """Recreate the distilled repository capability.
+
+    Implement this function from EVIDENCE_PATHS, capability-map.md, examples,
+    templates, and tests. Preserve observed inputs, outputs, validation, and errors.
+    """
+    raise NotImplementedError("Implement and test this same-language function before shipping.")
+{cli}'''
+
+
+def typescript_function_code(
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
+    evidence = quoted_list(evidence_paths or ["Fill from capability-map.md"])
+    cli = ""
+    if api_shape in {"cli", "both"}:
+        cli = f'''
+
+if (import.meta.url === `file://${{process.argv[1]}}`) {{
+  const result = await {function_name}(process.argv[2]);
+  console.log(JSON.stringify(result, null, 2));
+}}
+'''
+    return f'''/**
+ * Standalone callable functions distilled for {script_path}.
+ *
+ * Fill this module from bundled skill references before sharing the generated
+ * skill. Keep it independent from the original repository checkout.
+ */
+
+export type CapabilityConfig = Record<string, unknown>;
+
+export const evidencePaths = [{evidence}] as const;
+
+export async function {function_name}(
+  inputData: unknown = undefined,
+  config: CapabilityConfig = {{}},
+): Promise<unknown> {{
+  void inputData;
+  void config;
+  throw new Error("Implement and test this same-language function before shipping.");
+}}
+{cli}'''
+
+
+def javascript_function_code(
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
+    evidence = quoted_list(evidence_paths or ["Fill from capability-map.md"])
+    cli = ""
+    if api_shape in {"cli", "both"}:
+        cli = f'''
+
+if (import.meta.url === `file://${{process.argv[1]}}`) {{
+  const result = await {function_name}(process.argv[2]);
+  console.log(JSON.stringify(result, null, 2));
+}}
+'''
+    return f'''/**
+ * Standalone callable functions distilled for {script_path}.
+ *
+ * Fill this module from bundled skill references before sharing the generated
+ * skill. Keep it independent from the original repository checkout.
+ */
+
+export const evidencePaths = [{evidence}];
+
+export async function {function_name}(inputData = undefined, config = {{}}) {{
+  void inputData;
+  void config;
+  throw new Error("Implement and test this same-language function before shipping.");
+}}
+{cli}'''
+
+
+def go_function_code(
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
+    evidence = quoted_list(evidence_paths or ["Fill from capability-map.md"])
+    return f'''// Package scripts contains standalone callable functions distilled for {script_path}.
+package scripts
+
+import "fmt"
+
+var EvidencePaths = []string{{{evidence}}}
+
+// {function_name} recreates the distilled repository capability.
+// Implement it from EvidencePaths, capability-map.md, examples, templates, and tests before sharing.
+func {function_name}(inputData any, config map[string]any) (any, error) {{
+	return nil, fmt.Errorf("implement and test this same-language function before shipping")
+}}
+'''
+
+
+def rust_function_code(
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
+    evidence = quoted_list(evidence_paths or ["Fill from capability-map.md"])
+    return f'''//! Standalone callable functions distilled for {script_path}.
+//! Fill this module from bundled skill references before sharing the generated skill.
+
+pub const EVIDENCE_PATHS: &[&str] = &[{evidence}];
+
+pub fn {function_name}(input_data: &str) -> Result<String, String> {{
+    let _ = input_data;
+    Err("implement and test this same-language function before shipping".to_string())
+}}
+'''
+
+
+def ruby_function_code(
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
+    evidence = quoted_list(evidence_paths or ["Fill from capability-map.md"], quote="'")
+    return f'''# Standalone callable functions distilled for {script_path}.
+# Fill this file from bundled skill references before sharing the generated skill.
+
+EVIDENCE_PATHS = [{evidence}].freeze
+
+def {function_name}(input_data = nil, config = {{}})
+  raise NotImplementedError, 'Implement and test this same-language function before shipping.'
+end
+'''
+
+
+def starter_function_code(
+    language: str,
+    script_path: str,
+    function_name: str,
+    evidence_paths: list[str],
+    api_shape: str,
+) -> str:
+    if language == "typescript":
+        return typescript_function_code(script_path, function_name, evidence_paths, api_shape)
+    if language == "javascript":
+        return javascript_function_code(script_path, function_name, evidence_paths, api_shape)
+    if language == "go":
+        return go_function_code(script_path, function_name, evidence_paths, api_shape)
+    if language == "rust":
+        return rust_function_code(script_path, function_name, evidence_paths, api_shape)
+    if language == "ruby":
+        return ruby_function_code(script_path, function_name, evidence_paths, api_shape)
+    return python_function_code(script_path, function_name, evidence_paths, api_shape)
+
+
+def build_script_artifacts(
+    root: Path,
+    files: list[Path],
+    script_focus_paths: tuple[str, ...],
+    preferred_language: str,
+    api_shape: str,
+) -> list[dict[str, object]]:
+    used_names: set[str] = set()
+    artifacts: list[dict[str, object]] = []
+    for scope in script_focus_paths[:8]:
+        language = language_for_script_target(root, files, scope, preferred_language)
+        file_name = script_filename_from_scope(scope, language, used_names)
+        script_path = f"scripts/{file_name}"
+        function_name = function_name_from_scope(scope, language)
+        evidence = paths_for_scope(root, files, scope)
+        role = infer_capability_role(scope)
+        artifacts.append(
+            {
+                "scope": scope,
+                "language": language,
+                "path": script_path,
+                "function_name": function_name,
+                "evidence": evidence,
+                "role": role,
+                "code": starter_function_code(language, script_path, function_name, evidence, api_shape),
+            }
+        )
+    return artifacts
+
+
+def write_script_artifacts(
+    output_dir: Path,
+    artifacts: list[dict[str, object]],
+    overwrite: bool,
+) -> list[Path]:
+    written: list[Path] = []
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for artifact in artifacts:
+        relative = Path(str(artifact["path"]))
+        name = relative.name
+        target = output_dir / name
+        if target.exists() and not overwrite:
+            raise FileExistsError(f"script output exists; pass --script-overwrite to replace it: {target}")
+        target.write_text(str(artifact["code"]).rstrip() + "\n", encoding="utf-8", newline="\n")
+        written.append(target)
+    return written
 
 
 def callable_scripts_block(
-    root: Path,
-    files: list[Path],
     source_paths: list[str],
     focus_paths: tuple[str, ...],
     script_focus_paths: tuple[str, ...],
     script_note: str,
+    script_language: str,
+    script_api: str,
+    script_output_dir: str | None,
+    script_artifacts: list[dict[str, object]],
 ) -> str:
     if not script_focus_paths:
         candidate_scopes = list(focus_paths) or source_paths[:8]
         candidates = [f"{scope}: {infer_capability_role(scope)}" for scope in candidate_scopes[:12]]
         return f"""~~~markdown
-# Callable Scripts
+# Callable Function Files
 
 No `--script-focus` paths were provided. If the generated skill should include
-callable helpers, choose stable, repeatable capabilities and rerun the scanner
-with one or more `--script-focus PATH` values.
+callable same-language functions, choose stable, repeatable capabilities and
+rerun the scanner with one or more `--script-focus PATH_OR_LABEL` values and a
+`--script-output-dir` pointing at the generated skill's `scripts/` directory.
 
 ## Candidate Areas
 
@@ -946,60 +1312,65 @@ with one or more `--script-focus PATH` values.
 
 ## Shipping Rule
 
-Only include files under `scripts/` after implementing and testing them. Do not
-ship placeholder scripts, absolute generation paths, or imports from the
-original repository checkout unless the user explicitly asked for a wrapper.
+Only include files under `scripts/` after implementing and testing direct
+callable functions. Do not ship placeholder files, absolute generation paths,
+or imports from the original repository checkout unless the user explicitly
+asked for a wrapper.
 ~~~
 """
 
-    used_names: set[str] = set()
     contract_lines = []
-    starter_sections = []
-    for scope in script_focus_paths[:8]:
-        script_name = script_filename_from_scope(scope, used_names)
-        script_path = f"scripts/{script_name}"
-        evidence = paths_for_scope(root, files, scope)
-        role = infer_capability_role(scope)
+    for artifact in script_artifacts:
+        evidence = list(artifact["evidence"])
         evidence_text = ", ".join(f"`{item}`" for item in evidence) if evidence else "no direct scanned file match"
-        contract_lines.append(f"- `{script_path}`: recreate `{scope}` as {role}; evidence: {evidence_text}")
-        starter_sections.append(
-            f"""## `{script_path}`
-
-```python
-{starter_script_code(script_path, evidence).rstrip()}
-```"""
+        contract_lines.append(
+            "- `{path}` exports `{function}` in `{language}` to recreate `{scope}` "
+            "as {role}; evidence: {evidence}".format(
+                path=artifact["path"],
+                function=artifact["function_name"],
+                language=artifact["language"],
+                scope=artifact["scope"],
+                role=artifact["role"],
+                evidence=evidence_text,
+            )
         )
 
     return f"""~~~markdown
-# Callable Scripts
+# Callable Function Files
 
-Use this reference when the generated skill should ship executable helpers under
-`scripts/`. The scanner can only draft contracts and starter shapes; before
-sharing the final skill, implement the behavior from the bundled capability map
-and source map, then test each script.
+Use this reference as an index for actual function files under `scripts/`.
+The final generated skill should ship same-language callable functions, not only
+Markdown descriptions. The scanner can create function files when
+`--script-output-dir` is provided; before sharing the final skill, replace any
+placeholder bodies with behavior distilled from the capability map, examples,
+templates, and tests, then test each function.
 
 ## User Script Note
 
 {script_note or "None provided."}
 
+## Generation Settings
+
+- Script language: `{script_language}`
+- Script API shape: `{script_api}`
+- Script output dir: `{script_output_dir or "not provided; create files manually in the generated skill scripts directory"}`
+
 ## Requested Script Contracts
 
 {chr(10).join(contract_lines)}
 
-## Starter Script Templates
-
-{chr(10).join(starter_sections)}
-
 ## Shipping Rule
 
-- Keep scripts standalone and portable.
+- Keep function files standalone and portable.
+- Prefer same-language exports that other code can import directly.
 - Do not import the original repository unless the user explicitly requested a
   wrapper around that repository.
 - Preserve security-sensitive behavior such as credential handling, SQL
   parameterization, path validation, and destructive-operation guards.
-- Run each script with `--help` and at least one fixture or parity test before
+- Run each generated function through at least one fixture or parity test before
   distributing the generated skill.
-- Do not ship scripts that still raise `NotImplementedError`.
+- Do not ship function files that still raise placeholder `NotImplementedError`
+  or equivalent placeholder errors.
 ~~~
 """
 
@@ -1078,6 +1449,7 @@ def portable_reference_block(
     config_paths: list[str],
     source_paths: list[str],
     test_paths: list[str],
+    other_paths: list[str],
     focus_paths: tuple[str, ...],
     include_paths: tuple[str, ...],
     exclude_paths: tuple[str, ...],
@@ -1091,6 +1463,7 @@ def portable_reference_block(
     file_roles.extend(role_map(config_paths[:12], "tooling, CI, style, or environment config"))
     file_roles.extend(role_map(source_paths[:12], "representative implementation source"))
     file_roles.extend(role_map(test_paths[:12], "representative test coverage"))
+    file_roles.extend(role_map(other_paths[:12], "other scanned text, DSL, template, or capability evidence"))
 
     return f"""```markdown
 # Repo Conventions
@@ -1205,9 +1578,9 @@ def platform_frontmatter(
     if skill_purpose == "capability":
         description = (
             f"Recreate capabilities learned from the {repo_name} repository as "
-            f"standalone scripts or tools. Use when {subject} needs to implement "
+            f"standalone same-language functions or tools. Use when {subject} needs to implement "
             "equivalent workflows, templates, data transforms, integrations, or "
-            "domain scripts without depending on the original repository checkout."
+            "domain functions without depending on the original repository checkout."
         )
     else:
         description = (
@@ -1249,13 +1622,14 @@ def make_skill_draft(
         if skill_purpose == "capability":
             reference_step = (
                 "Read the bundled `references/capability-map.md`, "
-                "`references/source-map.md`, `references/implementation-blueprint.md`, "
-                "`references/repo-conventions.md`, and optional "
-                "`references/callable-scripts.md` before writing scripts."
+                "`references/implementation-blueprint.md`, "
+                "`references/repo-conventions.md`, optional "
+                "`references/callable-scripts.md`, and same-language files under "
+                "`scripts/` before implementing capability functions."
             )
             playbook_step = (
-                "Use the capability map and implementation blueprint to design a "
-                "standalone script before opening or copying source code."
+                "Use the capability map and implementation blueprint to design "
+                "standalone same-language functions."
             )
         else:
             reference_step = (
@@ -1273,10 +1647,11 @@ def make_skill_draft(
             reference_step = (
                 "Read the bundled `references/capability-map.md` and "
                 "`references/repo-conventions.md`, plus optional "
-                "`references/callable-scripts.md`, before writing scripts."
+                "`references/callable-scripts.md` and `scripts/`, before writing "
+                "or using capability functions."
             )
             playbook_step = (
-                "Use the bundled capability notes to design the standalone script."
+                "Use the bundled capability notes to design standalone functions."
             )
         else:
             reference_step = (
@@ -1291,7 +1666,7 @@ def make_skill_draft(
     if skill_purpose == "capability":
         overview = (
             "Use the bundled repository knowledge to recreate focused capabilities "
-            "as standalone scripts or tools. This skill is portable: it must not "
+            "as standalone same-language functions or tools. This skill is portable: it must not "
             "depend on the original local repository path used during generation."
         )
         checkout_step = (
@@ -1304,14 +1679,14 @@ def make_skill_draft(
         )
         workflow_tail = (
             "5. Use the commands, contracts, templates, and test evidence recorded in the bundled references.\n"
-            "6. Prefer simple standalone interfaces and minimal dependencies.\n"
+            "6. Prefer direct same-language function exports and minimal dependencies.\n"
             "7. Preserve behavior, inputs, outputs, validation, and error handling described in the capability references.\n"
             "8. Build parity tests from examples, fixtures, templates, and observed expected outputs.\n"
-            "9. If completed helper scripts are bundled under `scripts/`, prefer reusing them for matching operations and keep their behavior portable."
+            "9. If completed function files are bundled under `scripts/`, import and reuse those functions for matching operations."
         )
         script_rule = (
-            "Do not treat script starter templates as complete tools; bundled "
-            "scripts must be implemented and tested."
+            "Do not treat function starter files as complete tools; bundled "
+            "functions must be implemented and tested."
         )
     else:
         overview = (
@@ -1332,11 +1707,11 @@ def make_skill_draft(
             "6. Follow existing repository interfaces, dependencies, naming, and file organization.\n"
             "7. Preserve behavior, validation, and error handling unless the user asks for a behavior change.\n"
             "8. Add or update tests that match the repository's observed testing style.\n"
-            "9. If completed helper scripts are bundled under `scripts/`, use them only for their documented repeatable operations."
+            "9. If completed helper functions are bundled under `scripts/`, use them only for their documented repeatable operations."
         )
         script_rule = (
-            "Do not rely on script starter templates as repository facts; bundled "
-            "scripts must be implemented and tested."
+            "Do not rely on function starter files as repository facts; bundled "
+            "functions must be implemented and tested."
         )
     return f"""```markdown
 {frontmatter}
@@ -1409,6 +1784,11 @@ def build_markdown(
     skill_purpose: str,
     script_focus_paths: tuple[str, ...],
     script_note: str,
+    script_language: str,
+    script_api: str,
+    script_output_dir: str | None,
+    script_artifacts: list[dict[str, object]],
+    full_scan: bool,
 ) -> str:
     repo_name = root.name
     files_by_kind: dict[str, list[Path]] = {"doc": [], "manifest": [], "config": [], "source": [], "test": [], "other": []}
@@ -1427,6 +1807,7 @@ def build_markdown(
     config_paths = [rel(path, root) for path in files_by_kind["config"][:20]]
     source_paths = [rel(path, root) for path in files_by_kind["source"][:20]]
     test_paths = [rel(path, root) for path in files_by_kind["test"][:20]]
+    other_paths = [rel(path, root) for path in files_by_kind["other"][:20]]
 
     counts = Counter(classify(path, root) for path in files)
     platform_sections = build_platform_sections(
@@ -1442,6 +1823,7 @@ def build_markdown(
         config_paths,
         source_paths,
         test_paths,
+        other_paths,
         focus_paths,
         include_paths,
         exclude_paths,
@@ -1471,6 +1853,7 @@ def build_markdown(
             config_paths,
             source_paths,
             test_paths,
+            other_paths,
             focus_paths,
             include_paths,
             exclude_paths,
@@ -1488,12 +1871,14 @@ def build_markdown(
             script_note,
         )
         callable_scripts = callable_scripts_block(
-            root,
-            files,
             source_paths,
             focus_paths,
             script_focus_paths,
             script_note,
+            script_language,
+            script_api,
+            script_output_dir,
+            script_artifacts,
         )
 
     return f"""# Repo Skill Draft: {skill_name}
@@ -1505,6 +1890,8 @@ Target: `{target}`
 Knowledge depth: `{knowledge_depth}`
 
 Skill purpose: `{skill_purpose}`
+
+Full scan: `{full_scan}`
 
 Portability: generated skill content must use repo-root-relative paths and must
 not depend on the absolute generation path.
@@ -1521,6 +1908,14 @@ Script focus paths: {", ".join(f"`{item}`" for item in script_focus_paths) or "n
 
 Script note: {script_note or "not provided"}
 
+Script language: `{script_language}`
+
+Script API: `{script_api}`
+
+Script output dir: `{script_output_dir or "not provided"}`
+
+Generated function files: {", ".join(f"`{artifact['path']}`" for artifact in script_artifacts) or "none"}
+
 ## Scan Summary
 
 - Text-like files scanned: {len(files)}
@@ -1529,6 +1924,7 @@ Script note: {script_note or "not provided"}
 - Configs: {counts.get("config", 0)}
 - Source files: {counts.get("source", 0)}
 - Test files: {counts.get("test", 0)}
+- Other text files: {counts.get("other", 0)}
 
 ## Recommended Reading Order
 
@@ -1564,6 +1960,10 @@ Script note: {script_note or "not provided"}
 
 {bullet_list(test_paths)}
 
+### Other Text Evidence
+
+{bullet_list(other_paths)}
+
 ## Repo Conventions To Confirm Manually
 
 - Architecture and subsystem boundaries
@@ -1597,8 +1997,11 @@ Copy this capability map into the generated skill when the purpose is
 
 ## Self-Contained `references/source-map.md`
 
-Copy this bundled source map into the generated skill when using
-`--knowledge-depth self-contained`.
+Draft-only evidence for the agent creating the skill. For capability skills,
+do not ship this to end users by default; internalize the relevant behavior into
+`capability-map.md`, `implementation-blueprint.md`, tests, and same-language
+function files under `scripts/`. For development skills, you may copy it when a
+source map is useful.
 
 {source_map or "Not generated. Re-run with `--knowledge-depth self-contained`."}
 
@@ -1611,8 +2014,9 @@ Copy this implementation blueprint into the generated skill when the purpose is
 
 ## Capability `references/callable-scripts.md`
 
-Copy this script reference into the generated skill when the user wants
-callable helpers. Implement final files under `scripts/` before sharing.
+Copy this function index into the generated skill when the user wants callable
+helpers. The actual usable artifacts should be same-language function files
+under `scripts/`; implement them before sharing.
 
 {callable_scripts or "Not generated. Re-run with `--skill-purpose capability`."}
 
@@ -1632,14 +2036,48 @@ def main() -> int:
         print(f"error: --repo must be an existing directory: {root}", file=sys.stderr)
         return 2
 
+    output_path = None
+    if args.output:
+        output_path = Path(args.output).expanduser().resolve()
+        if output_path.exists() and not args.overwrite:
+            print(f"error: output exists; pass --overwrite to replace it: {output_path}", file=sys.stderr)
+            return 3
+
     skill_name = normalize_skill_name(args.skill_name)
     focus_paths = normalize_scope_paths(args.focus)
     include_paths = normalize_scope_paths(args.include)
     exclude_paths = normalize_scope_paths(args.exclude)
     script_focus_paths = normalize_scope_paths(args.script_focus)
+    max_files = 0 if args.full_scan else args.max_files
     files = list(
-        iter_files(root, args.max_files, focus_paths, include_paths, exclude_paths)
+        iter_files(
+            root,
+            max_files,
+            focus_paths,
+            include_paths,
+            exclude_paths,
+            include_unknown_text=args.full_scan,
+        )
     )
+    script_artifacts = build_script_artifacts(
+        root,
+        files,
+        script_focus_paths,
+        args.script_language,
+        args.script_api,
+    )
+    if args.script_output_dir and script_artifacts:
+        try:
+            written = write_script_artifacts(
+                Path(args.script_output_dir).expanduser().resolve(),
+                script_artifacts,
+                args.script_overwrite,
+            )
+        except FileExistsError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return 4
+        for path in written:
+            print(f"Wrote function file: {path}")
     markdown = build_markdown(
         root,
         skill_name,
@@ -1654,16 +2092,17 @@ def main() -> int:
         args.skill_purpose,
         script_focus_paths,
         args.script_note,
+        args.script_language,
+        args.script_api,
+        args.script_output_dir,
+        script_artifacts,
+        args.full_scan,
     )
 
-    if args.output:
-        output = Path(args.output).expanduser().resolve()
-        if output.exists() and not args.overwrite:
-            print(f"error: output exists; pass --overwrite to replace it: {output}", file=sys.stderr)
-            return 3
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(markdown, encoding="utf-8", newline="\n")
-        print(f"Wrote draft: {output}")
+    if output_path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(markdown, encoding="utf-8", newline="\n")
+        print(f"Wrote draft: {output_path}")
     else:
         print(markdown)
     return 0

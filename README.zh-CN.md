@@ -4,10 +4,10 @@
 
 从现有代码仓库生成可移植的、仓库专属的 agent skill。
 
-这个 skill 会读取目标仓库一次，提取它的核心能力、命令、工具链、源码地图、
-实现蓝图、测试体系，以及可选的脚本化目标，然后把这些知识打包进一个
-self-contained skill。生成后的 skill 可以分享给其他人使用，并能指导 agent
-在不依赖原始本地 checkout 的情况下，写出功能等价的独立脚本。
+这个 skill 会读取目标仓库一次，提取它的核心能力、命令、工具链、实现蓝图、
+测试体系，以及可选的函数目标，然后把这些知识打包进一个 self-contained
+skill。生成后的 skill 可以分享给其他人使用，并能在 `scripts/` 下携带同语言
+可调用函数，不依赖生成时的原始本地 checkout。
 
 ## 能生成什么
 
@@ -24,11 +24,12 @@ self-contained skill。生成后的 skill 可以分享给其他人使用，并�
 - `references/capability-map.md`：核心能力、输入输出、模板、集成和证据文件
 - `references/repo-conventions.md`：架构、命令、工具链、风格、测试、
   文档和坑点
-- `references/source-map.md`：重要模块、公共 API 和测试覆盖面
-- `references/implementation-blueprint.md`：如何根据仓库行为复刻独立脚本
+- `references/implementation-blueprint.md`：如何根据仓库行为复刻同语言函数
 - `references/task-playbook.md`：任务路由和验证建议
-- 可选 `references/callable-scripts.md` 和 `scripts/`：当用户指定某些能力要
-  变成可复用脚本时一起分发
+- 可选 `references/callable-scripts.md` 和 `scripts/` 下的同语言函数文件：
+  当用户指定某些能力要变成可复用函数时一起分发
+- 可选、仅用于审计或开发场景的 `references/source-map.md`；能力型 skill
+  默认不应该分发它
 
 ## 安装
 
@@ -124,6 +125,10 @@ conventions-only 草稿，可以使用 `--knowledge-depth portable`。
 只有当你明确想在原仓库里继续开发、修改、测试时，才使用
 `--skill-purpose development`。
 
+当项目的核心能力可能藏在非常规目录时，可以使用 `--full-scan`。它会扫描
+所有已知文本类文件，也会嗅探未知扩展名但看起来是文本的文件，并忽略
+`--max-files`；同时仍然遵守跳过目录规则和 `--exclude`。
+
 ### 自定义扫描范围
 
 有些仓库的核心逻辑不在常见的 `src/` 或 `app/` 目录里。比如一个数据挖掘
@@ -151,31 +156,36 @@ python scripts/draft_repo_skill.py \
 - `--scope-note TEXT`：记录用户对扫描重点的说明，并保存在生成的 references
   里。
 
-### 可调用脚本目标
+### 可调用函数目标
 
-当生成的 skill 需要自带 helper scripts 时，可以明确告诉扫描器哪些能力要
-写成脚本：
+当生成的 skill 需要自带可 import 的函数时，可以明确告诉扫描器哪些能力要
+写成 `scripts/` 下的同语言函数文件：
 
 ```bash
 python scripts/draft_repo_skill.py \
   --repo /path/to/mining-framework \
-  --skill-name mining-framework-tools \
-  --target all \
+  --skill-name mining-framework-functions \
+  --target opencode \
+  --full-scan \
   --focus dag \
   --focus plugin/templates \
   --script-focus dag \
   --script-focus plugin/templates \
-  --script-note "turn the DAG runner and database template renderer into portable scripts" \
+  --script-output-dir .opencode/skills/mining-framework-functions/scripts \
+  --script-language auto \
+  --script-api function \
+  --script-note "turn the DAG runner and database template renderer into portable functions" \
   --output mining-framework-skill-draft.md
 ```
 
 `--script-focus PATH_OR_LABEL` 用来记录某个相对仓库根目录的文件、目录，
-或者一个能力标签，其行为应该被暴露为最终 skill 的脚本。对于函数名、
+或者一个能力标签，其行为应该被暴露为最终 skill 的函数。对于函数名、
 通用工具名、无法直接映射到路径的实现意图，可以写进 `--script-note`。
-扫描器会在 `references/callable-scripts.md` 中生成脚本契约和 starter 形状；
-最终分享 skill 之前，需要把实际脚本放进 `scripts/` 并完成实现和测试。
-不要发布仍是占位模板的脚本，也不要让脚本依赖原始仓库，除非用户明确要求
-生成 wrapper。
+传入 `--script-output-dir` 时，扫描器会直接在生成 skill 的 `scripts/` 目录
+写出同语言函数文件。`references/callable-scripts.md` 只是索引和契约；
+真正可用的产物应该是函数文件。最终分享 skill 之前，需要完成函数实现和
+测试。不要发布仍是占位模板的函数，也不要让函数依赖原始仓库，除非用户
+明确要求生成 wrapper。
 
 ## 工作流程
 
@@ -185,12 +195,13 @@ python scripts/draft_repo_skill.py \
 4. 填充并一起分发这些 bundled references：
    - `capability-map.md`
    - `repo-conventions.md`
-   - `source-map.md`
    - `implementation-blueprint.md`
    - `task-playbook.md`
-   - 如果请求了脚本，还要包含 `callable-scripts.md` 和 `scripts/`
-5. 如果目标 agent 有 validator，运行对应校验；如果包含脚本，还要运行
-   `--help` 和至少一个 fixture 或 parity test。
+   - 如果请求了函数，还要包含 `callable-scripts.md` 和同语言 `scripts/`
+5. 除非用户明确要求可审计的源码地图，否则能力型 skill 最终不要包含
+   `source-map.md`。
+6. 如果目标 agent 有 validator，运行对应校验；如果包含函数，还要运行至少
+   一个 fixture 或 parity test。
 
 不要发布一个只写着“去读这个仓库”的 skill。这个项目的目标是打包足够多
 的仓库知识，让别人拿到 skill 后不需要访问你生成 skill 时的本地 checkout。
@@ -210,6 +221,6 @@ scripts/draft_repo_skill.py
 
 - 扫描器只使用 Python 标准库。
 - 生成的 reference 里应该使用相对仓库根目录的路径。
-- 生成的 source map 是一个起点。对于高价值、可复用的 skill，建议在分享
-  前手动打磨。
-- 生成的脚本必须是完成实现并验证过的脚本，不能只是扫描器模板。
+- 生成的 source map 只是草稿证据。对于高价值、可复用的能力型 skill，应把
+  行为内化进能力文档和函数文件，而不是把 source map 交给最终用户。
+- 生成的函数必须是完成实现并验证过的函数，不能只是扫描器模板。

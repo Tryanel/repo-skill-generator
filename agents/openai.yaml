@@ -1,4 +1,4 @@
 interface:
   display_name: "Repo Skill Generator"
-  short_description: "Distill repository capabilities into portable agent skills."
-  default_prompt: "Use $repo-skill-generator to inspect this repository and create a Codex, Claude, or OpenCode skill that can recreate its focused capabilities as standalone scripts; ask me which folders or operations should be emphasized."
+  short_description: "Distill repository capabilities into portable function skills."
+  default_prompt: "Use $repo-skill-generator to inspect this repository and create a Codex, Claude, or OpenCode skill that recreates focused capabilities as same-language callable functions; ask me whether to full-scan and which folders or operations should be emphasized."
