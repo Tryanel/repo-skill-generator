@@ -2,12 +2,12 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-从现有代码仓库生成可移植的、仓库专属的 agent skill。
+从现有项目生成可移植的、源不可见的能力型 agent skill。
 
-这个 skill 会读取目标仓库一次，提取它的核心能力、命令、工具链、实现蓝图、
-测试体系，以及可选的函数目标，然后把这些知识打包进一个 self-contained
-skill。生成后的 skill 可以分享给其他人使用，并能在 `scripts/` 下携带同语言
-可调用函数，不依赖生成时的原始本地 checkout。
+这个 skill 会把目标项目作为一次性训练材料进行全量扫描，分析它的框架和
+功能模块，然后和用户协商：哪些能力要写进新 skill、哪些要封装成
+`scripts/` 下的同语言可调用函数。最终生成的 skill 是源不可见的：不暴露源
+项目名称、路径、文件名、source map 或生成证据。
 
 ## 能生成什么
 
@@ -18,13 +18,13 @@ skill。生成后的 skill 可以分享给其他人使用，并能在 `scripts/`
 - OpenCode
 - Agent Skills 兼容布局
 
-为了开箱即用，最终生成的 skill 应该包含：
+为了开箱即用，最终能力型 skill 应该包含：
 
 - `SKILL.md`：触发条件和工作流程
-- `references/capability-map.md`：核心能力、输入输出、模板、集成和证据文件
-- `references/repo-conventions.md`：架构、命令、工具链、风格、测试、
-  文档和坑点
-- `references/implementation-blueprint.md`：如何根据仓库行为复刻同语言函数
+- `references/capability-map.md`：核心能力、输入输出、模板、集成、契约和示例
+- `references/capability-conventions.md`：源不可见的模块说明、用法细节、
+  函数风格、测试和坑点
+- `references/implementation-blueprint.md`：如何根据已批准的能力契约复刻同语言函数
 - `references/task-playbook.md`：任务路由和验证建议
 - 可选 `references/callable-scripts.md` 和 `scripts/` 下的同语言函数文件：
   当用户指定某些能力要变成可复用函数时一起分发
@@ -102,20 +102,20 @@ OpenCode 也可以发现兼容的 `.claude/skills/` 和 `.agents/skills/` 布局
 
 ```bash
 python scripts/draft_repo_skill.py \
-  --repo /path/to/repo \
-  --skill-name repo-name-dev \
+  --repo /path/to/project \
+  --skill-name capability-tools \
   --target all \
   --knowledge-depth self-contained \
   --skill-purpose capability \
-  --output repo-skill-draft.md
+  --output capability-skill-draft.md
 ```
 
 只生成某一种目标格式：
 
 ```bash
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target codex --output draft.md
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target claude --output draft.md
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target opencode --output draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target codex --output draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target claude --output draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target opencode --output draft.md
 ```
 
 `--knowledge-depth self-contained` 是默认值。如果只想要更轻量的
@@ -125,9 +125,9 @@ conventions-only 草稿，可以使用 `--knowledge-depth portable`。
 只有当你明确想在原仓库里继续开发、修改、测试时，才使用
 `--skill-purpose development`。
 
-当项目的核心能力可能藏在非常规目录时，可以使用 `--full-scan`。它会扫描
-所有已知文本类文件，也会嗅探未知扩展名但看起来是文本的文件，并忽略
-`--max-files`；同时仍然遵守跳过目录规则和 `--exclude`。
+默认就是全量扫描：扫描所有已知文本类文件，也会嗅探未知扩展名但看起来是
+文本的文件，并忽略 `--max-files`；同时仍然遵守跳过目录规则和 `--exclude`。
+只有当项目太大时，才使用 `--sample-scan --max-files N`。
 
 ### 自定义扫描范围
 
@@ -153,8 +153,7 @@ python scripts/draft_repo_skill.py \
   传多个。
 - `--include PATH`：即使某个路径通常会被跳过，也强制纳入扫描。
 - `--exclude PATH`：本次扫描跳过某个路径。
-- `--scope-note TEXT`：记录用户对扫描重点的说明，并保存在生成的 references
-  里。
+- `--scope-note TEXT`：记录用户对扫描重点的说明，并保存在生成阶段的提案里。
 
 ### 可调用函数目标
 
@@ -189,22 +188,28 @@ python scripts/draft_repo_skill.py \
 
 ## 工作流程
 
-1. 对目标仓库运行扫描器。
-2. 阅读生成的草稿，并检查草稿列出的证据文件。
-3. 为目标 agent 创建最终 skill 文件夹。
-4. 填充并一起分发这些 bundled references：
+1. 对目标项目运行扫描器。默认全量扫描。
+2. 阅读生成的草稿，并检查草稿列出的“生成期证据”。
+3. 分析项目框架、功能模块、数据流、模板、集成、输入输出、错误处理、
+   fixtures 和测试。
+4. 把草稿里的源不可见提案展示给用户。
+5. 让用户决定哪些能力写入、哪些省略、哪些合并或重命名、哪些封装成函数。
+   用户确认前不要生成最终 skill。
+6. 为目标 agent 创建最终 skill 文件夹。
+7. 填充并一起分发这些源不可见 bundled references：
    - `capability-map.md`
-   - `repo-conventions.md`
+   - `capability-conventions.md`
    - `implementation-blueprint.md`
    - `task-playbook.md`
    - 如果请求了函数，还要包含 `callable-scripts.md` 和同语言 `scripts/`
-5. 除非用户明确要求可审计的源码地图，否则能力型 skill 最终不要包含
+8. 除非用户明确要求可审计的源码地图，否则能力型 skill 最终不要包含
    `source-map.md`。
-6. 如果目标 agent 有 validator，运行对应校验；如果包含函数，还要运行至少
+9. 如果目标 agent 有 validator，运行对应校验；如果包含函数，还要运行至少
    一个 fixture 或 parity test。
 
-不要发布一个只写着“去读这个仓库”的 skill。这个项目的目标是打包足够多
-的仓库知识，让别人拿到 skill 后不需要访问你生成 skill 时的本地 checkout。
+不要发布一个只写着“去读这个仓库”的 skill，也不要把源项目路径、文件名、
+source map 或证据列表交给最终用户。最终 skill 应该像这些能力本来就是它
+自己的能力一样工作。
 
 ## 仓库内容
 
@@ -220,7 +225,7 @@ scripts/draft_repo_skill.py
 ## 说明
 
 - 扫描器只使用 Python 标准库。
-- 生成的 reference 里应该使用相对仓库根目录的路径。
+- 最终生成的 reference 里不应该出现源项目路径或文件名。
 - 生成的 source map 只是草稿证据。对于高价值、可复用的能力型 skill，应把
   行为内化进能力文档和函数文件，而不是把 source map 交给最终用户。
 - 生成的函数必须是完成实现并验证过的函数，不能只是扫描器模板。

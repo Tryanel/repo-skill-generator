@@ -1,39 +1,41 @@
 ---
 name: repo-skill-generator
-description: Inspect a code repository and create repo-specific Codex, Claude, or OpenCode skills that distill focused capabilities into portable knowledge packs and optional same-language callable functions.
+description: Fully scan a project as one-time training material, negotiate the desired capability set with the user, and create source-invisible Codex, Claude, or OpenCode capability skills with optional same-language functions.
 ---
 
 # Repo Skill Generator
 
 ## Instructions
 
-1. Confirm the target repository path, target platform, output skill name, user-defined focus paths, whether to use `--full-scan`, and any capabilities the user wants turned into same-language callable functions.
-2. From the repository root, run the canonical scanner from this project:
+1. Confirm the target project path, target platform, output skill name, known important areas, and whether any capabilities should become same-language functions.
+2. Run the canonical scanner from this project. Full scan is the default; use `--sample-scan --max-files N` only when full scan is impractical.
 
 ```bash
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target claude --knowledge-depth self-contained --skill-purpose capability --output repo-skill-draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target claude --knowledge-depth self-contained --skill-purpose capability --output capability-skill-draft.md
 ```
 
 Use `--target codex`, `--target claude`, `--target opencode`, or `--target all`.
-Use `--focus`, `--include`, `--exclude`, and `--scope-note` when the user says certain folders are core, for example `--focus dag --focus plugin/templates`.
-Use `--full-scan` when capabilities may live outside common source directories.
-Use `--script-focus PATH_OR_LABEL`, `--script-output-dir <skill>/scripts`, `--script-language auto`, and `--script-note TEXT` when the user wants specific paths, functions, or operations turned into bundled same-language functions.
+Use `--focus`, `--include`, `--exclude`, and `--scope-note` when the user identifies important areas.
+Use `--script-focus PATH_OR_LABEL`, `--script-output-dir <skill>/scripts`, `--script-language auto`, and `--script-note TEXT` when the user wants functions.
 
-3. Read the generated draft, then inspect the listed README, docs, manifests, config files, representative source files, tests, and user-focused capability paths.
-4. Create the target skill in the correct location:
-   - Codex: `<skills-dir>/<name>/SKILL.md`
-   - Claude: `.claude/skills/<name>/SKILL.md` or `~/.claude/skills/<name>/SKILL.md`
-   - OpenCode: `.opencode/skills/<name>/SKILL.md` or `~/.config/opencode/skills/<name>/SKILL.md`
-5. Put core workflow in `SKILL.md`; move self-contained capability knowledge into `references/capability-map.md`, `references/repo-conventions.md`, `references/implementation-blueprint.md`, and `references/task-playbook.md`. Do not ship `source-map.md` by default for capability skills.
-6. When functions are requested, implement tested same-language files under `scripts/` and document contracts in `references/callable-scripts.md`. Do not ship placeholder functions.
-7. Do not ship a generated skill that depends on the original local checkout used during generation. Future users should use bundled knowledge first and open a checkout only to verify drift or inspect missing details.
+3. Read the draft and inspect the full-scan evidence. Analyze framework, runtime, functional modules, data flow, templates, integrations, inputs, outputs, errors, fixtures, and tests.
+4. Present a source-neutral proposal before creating the final skill:
+   - capability modules to include
+   - module details for `references/capability-conventions.md`
+   - functions to implement under `scripts/`
+   - items to omit, merge, rename, or expand
+   - whether to include an auditable source map; default is no
+5. Continue only after the user approves or edits the proposal.
+6. Build the final skill as source-invisible:
+   - no source project names, paths, file names, source maps, source-to-test maps, or evidence lists
+   - no "learned from", "original repository", or "source project" phrasing
+   - capabilities are written as this new skill's native abilities
+7. Ship `SKILL.md`, `references/capability-map.md`, `references/capability-conventions.md`, `references/implementation-blueprint.md`, `references/task-playbook.md`, optional `references/callable-scripts.md`, and implemented same-language `scripts/` files.
 
 ## Rules
 
-- Do not invent repository capabilities or conventions.
-- Keep the generated skill concise and evidence-based.
-- Use repo-root-relative paths, not absolute generation paths.
+- Do not invent capability behavior.
 - Do not stop at the scanner draft when the user asks for a final skill.
-- For out-of-the-box use, ship capability map, conventions, implementation blueprint, task playbook, and any requested same-language functions together.
-- Preserve user-provided focus paths, script targets, and rationale in the final references.
+- Do not silently choose final scope; negotiate with the user first.
+- Do not ship placeholder functions.
 - Add target-specific frontmatter only when the target platform recognizes it.

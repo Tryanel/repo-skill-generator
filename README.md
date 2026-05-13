@@ -2,14 +2,14 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-Create portable, repo-specific agent skills from an existing code repository.
+Create portable, source-invisible capability skills from an existing project.
 
-This skill reads a target repository once, extracts focused capabilities,
-commands, tooling, implementation blueprints, tests, and optional function
-targets, then packages that knowledge into a self-contained skill. The generated
-skill can be shared with other people and can include same-language callable
-functions under `scripts/`, without depending on the original local checkout
-used during generation.
+This skill fully scans a target project once, analyzes its framework and
+functional modules, then asks the user which capabilities should become the new
+skill's documented abilities and which should become same-language callable
+functions under `scripts/`. The final generated skill is source-invisible: it
+does not expose source project names, paths, file names, source maps, or
+generation evidence.
 
 ## What It Generates
 
@@ -20,15 +20,15 @@ used during generation.
 - OpenCode
 - Agent Skills-compatible layouts
 
-For out-of-the-box portability, generated skills should include:
+For out-of-the-box portability, final capability skills should include:
 
 - `SKILL.md`: trigger and workflow instructions
 - `references/capability-map.md`: focused capabilities, inputs, outputs,
-  templates, integrations, and evidence files
-- `references/repo-conventions.md`: architecture, commands, tooling, style,
-  tests, docs, and pitfalls
+  templates, integrations, contracts, and examples
+- `references/capability-conventions.md`: source-neutral module explanations,
+  usage notes, function style, tests, and pitfalls
 - `references/implementation-blueprint.md`: how to recreate same-language functions
-  from observed repository behavior
+  from the approved capability contracts
 - `references/task-playbook.md`: task routing and verification guidance
 - Optional `references/callable-scripts.md` plus same-language files under
   `scripts/` when the user asks for specific capabilities to become reusable
@@ -108,20 +108,20 @@ Generate a self-contained draft for all supported targets:
 
 ```bash
 python scripts/draft_repo_skill.py \
-  --repo /path/to/repo \
-  --skill-name repo-name-dev \
+  --repo /path/to/project \
+  --skill-name capability-tools \
   --target all \
   --knowledge-depth self-contained \
   --skill-purpose capability \
-  --output repo-skill-draft.md
+  --output capability-skill-draft.md
 ```
 
 Generate only one target:
 
 ```bash
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target codex --output draft.md
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target claude --output draft.md
-python scripts/draft_repo_skill.py --repo /path/to/repo --skill-name repo-name-dev --target opencode --output draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target codex --output draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target claude --output draft.md
+python scripts/draft_repo_skill.py --repo /path/to/project --skill-name capability-tools --target opencode --output draft.md
 ```
 
 `--knowledge-depth self-contained` is the default. Use
@@ -133,10 +133,10 @@ focused repository capabilities as standalone tools. Use
 `--skill-purpose development` only when you explicitly want a skill for working
 inside the original repository.
 
-Use `--full-scan` when the project may hide important capabilities outside
-common source directories. It scans every known text-like file, also sniffs
-unknown extensions that look like text, and ignores `--max-files` while still
-respecting skip directories and `--exclude`.
+Full scan is the default. The scanner reads every known text-like file, also
+sniffs unknown extensions that look like text, and ignores `--max-files` while
+still respecting skip directories and `--exclude`. Use `--sample-scan
+--max-files N` only when full scan is impractical.
 
 ### Custom Scan Scope
 
@@ -164,7 +164,7 @@ Available scope flags:
 - `--include PATH`: Include a path even if it would normally be skipped.
 - `--exclude PATH`: Skip a path for this scan.
 - `--scope-note TEXT`: Record the user's explanation of what matters, and
-  preserve it in the generated references.
+  preserve it in the generation proposal.
 
 ### Callable Function Targets
 
@@ -201,23 +201,28 @@ asked for wrappers.
 
 ## Workflow
 
-1. Run the scanner against the target repository.
-2. Read the draft and inspect the evidence files it lists.
-3. Create the final skill folder for your target agent.
-4. Fill and ship the bundled references:
+1. Run the scanner against the target project. Full scan is the default.
+2. Read the draft and inspect the generation-only evidence files it lists.
+3. Analyze the project framework, functional modules, data flow, templates,
+   integrations, inputs, outputs, errors, fixtures, and tests.
+4. Present the source-neutral approval proposal from the draft to the user.
+5. Ask the user what to include, omit, merge, rename, expand, and package as
+   functions. Do not create the final skill until they approve.
+6. Create the final skill folder for the target agent.
+7. Fill and ship the bundled source-invisible references:
    - `capability-map.md`
-   - `repo-conventions.md`
+   - `capability-conventions.md`
    - `implementation-blueprint.md`
    - `task-playbook.md`
    - `callable-scripts.md` and same-language `scripts/` when functions were requested
-5. Do not include `source-map.md` in the final capability skill unless the user
+8. Do not include `source-map.md` in the final capability skill unless the user
    explicitly wants an auditable source map.
-6. Validate the generated skill with your agent's validator when available, and
+9. Validate the generated skill with your agent's validator when available, and
    run any bundled functions with at least one fixture or parity test.
 
-Do not ship a generated skill that only says "read the repository." The point
-is to package enough knowledge that another person can use the skill without
-access to the original local generation checkout.
+Do not ship a generated skill that tells users to read or provide the source
+project. The final skill must behave as if the distilled capabilities are its
+own native abilities.
 
 ## Repository Contents
 
@@ -233,7 +238,7 @@ scripts/draft_repo_skill.py
 ## Notes
 
 - The scanner uses only Python standard library modules.
-- Paths in generated references should be repo-root-relative.
+- Final generated references must not contain source project paths or file names.
 - The generated source map is draft-only evidence. For high-value reusable
   capability skills, internalize behavior into capability docs and functions
   instead of shipping source maps to end users.
